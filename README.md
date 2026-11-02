@@ -80,11 +80,12 @@ To keep it beside an agent instead of over it, open it as a pane:
 herdr-app do pane.split --direction right --mod walkthrough --props '{"scope":"branch"}'
 ```
 
-While developing, link the folder instead of copying it, and Herdr reloads the mod on
-every save:
+While developing, copy the folder again after each change; Herdr reloads the mod within
+a second. Copy, don't symlink: Herdr doesn't reload a symlinked mod folder when its files
+change.
 
 ```sh
-ln -s "$PWD/herdr-walkthrough/mods/walkthrough" ~/.config/herdr-app/mods/walkthrough
+cp -R herdr-walkthrough/mods/walkthrough ~/.config/herdr-app/mods/
 ```
 
 ## Updates
