@@ -235,3 +235,73 @@ test("open pull requests, newest update first, the current branch's marked", asy
   assert.deepEqual(prs.map((p) => [p.number, p.author, p.draft, p.current]), [[2, "y", true, true], [1, "x", false, false]]);
   await assert.rejects(pullRequests(fakeGh({ "pr list": "not json" }).exec, "/repo"), /something other than a list/);
 });
+
+// ——— Last turn: hooks/turn.sh against a real repository ———
+
+import { spawnSync } from "node:child_process";
+import { readdirSync, statSync } from "node:fs";
+import { parseListing, resolveEnds, turnSource, LISTING } from "../mods/walkthrough/lib/turns.js";
+
+const TURN_SH = new URL("../mods/walkthrough/hooks/turn.sh", import.meta.url).pathname;
+
+/** Every file under .git/objects with its size and time, and the index's bytes: what a snapshot must leave alone. */
+function gitState(repo) {
+  const files = [];
+  const walk = (d) => { for (const n of readdirSync(d)) { const p = join(d, n); statSync(p).isDirectory() ? walk(p) : files.push(`${p}:${statSync(p).size}:${statSync(p).mtimeMs}`); } };
+  walk(join(repo, ".git/objects"));
+  return { objects: files.sort(), index: readFileSync(join(repo, ".git/index")).toString("base64") };
+}
+
+test("a turn: the hooks snapshot before and after, and the turn reads as exactly what changed in between", async () => {
+  const repo = realpathSync(mkdtempSync(join(tmpdir(), "walkthrough-turn-")));
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "walkthrough-home-")));
+  await sh(repo, "init", "-q", "-b", "main");
+  await sh(repo, "config", "user.email", "t@t");
+  await sh(repo, "config", "user.name", "t");
+  // The commit's own background maintenance would come and go under .git/objects while it is compared.
+  await sh(repo, "config", "maintenance.auto", "false");
+  await sh(repo, "config", "gc.auto", "0");
+  writeFileSync(join(repo, "a.txt"), "one\ntwo\n");
+  writeFileSync(join(repo, "keep.txt"), "kept\n");
+  await sh(repo, "add", "-A");
+  await sh(repo, "commit", "-qm", "first");
+  // Work from before the turn is not the turn's.
+  writeFileSync(join(repo, "keep.txt"), "edited before the turn\n");
+  writeFileSync(join(repo, "early.txt"), "new before the turn\n");
+  const before = gitState(repo);
+  const hook = (event, input) => spawnSync("sh", [TURN_SH, event], { input: JSON.stringify(input), encoding: "utf8", env: { ...process.env, HOME: home, HC_TERMINAL_ID: "t1" } });
+
+  assert.equal(hook("start", { session_id: "s1", cwd: join(repo), hook_event_name: "UserPromptSubmit", prompt: "Make two TWO" }).status, 0);
+  writeFileSync(join(repo, "a.txt"), "one\nTWO\n");
+  writeFileSync(join(repo, "added.txt"), "added in the turn\n");
+  writeFileSync(join(repo, "huge.log"), "x".repeat(MAX_UNTRACKED_BYTES + 10));
+  mkdirSync(join(repo, "sub"));
+  const listed = () => {
+    const base = join(home, ".herdr/walkthrough/turns");
+    const folder = join(base, readdirSync(base).find((n) => !n.startsWith("input.")));
+    return resolveEnds(parseListing(spawnSync("sh", ["-c", LISTING, folder], { encoding: "utf8" }).stdout, folder));
+  };
+  const read = async (turn) => buildDigest((await loadSections(exec, repo, turnSource(turn))).sections).files.map((f) => `${f.scope}:${f.path}:${f.status}`);
+
+  // Still running: read up to now.
+  const [running] = listed();
+  assert.equal(running.state, "running");
+  assert.equal(running.prompt, "Make two TWO");
+  assert.deepEqual(await read(running), ["turn:a.txt:modified", "turn:added.txt:added"]);
+
+  assert.equal(hook("stop", { session_id: "s1", cwd: repo, hook_event_name: "Stop" }).status, 0);
+  writeFileSync(join(repo, "after.txt"), "after the turn\n");
+  const [done] = listed();
+  assert.equal(done.state, "done");
+  assert.equal(done.terminal, "t1");
+  assert.deepEqual(await read(done), ["turn:a.txt:modified", "turn:added.txt:added"]);
+  assert.equal(sourceKey(turnSource(done)), `turn:${done.id}`);
+  assert.match(describe(turnSource(done)), /answered the prompt "Make two TWO"/);
+
+  // Neither the hooks nor the reads wrote to the repository's index or objects.
+  assert.deepEqual(gitState(repo), before);
+  const status = (await exec("git", ["status", "--porcelain"], { cwd: repo })).stdout.split("\n").filter(Boolean);
+  assert.deepEqual(status, [" M a.txt", " M keep.txt", "?? added.txt", "?? after.txt", "?? early.txt", "?? huge.log"]);
+  rmSync(repo, { recursive: true, force: true });
+  rmSync(home, { recursive: true, force: true });
+});

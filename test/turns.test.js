@@ -1,0 +1,136 @@
+// Turns: reading what hooks/turn.sh leaves, and the script's own bookkeeping.
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { spawnSync, execFileSync } from "node:child_process";
+import { mkdtempSync, writeFileSync, rmSync, realpathSync, readdirSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { parseHook, parseMeta, parseListing, sortTurns, resolveEnds, pickTurn, lastFinished, firstLine, ago, turnSource, hookSettings, LISTING, RECORD, FILE } from "../mods/walkthrough/lib/turns.js";
+
+const SCRIPT = new URL("../mods/walkthrough/hooks/turn.sh", import.meta.url).pathname;
+const A = "a".repeat(40), B = "b".repeat(40), C = "c".repeat(40);
+
+test("the hook's JSON: prompt, session and folder, even cut short", () => {
+  const json = JSON.stringify({ session_id: "s1", transcript_path: "/t.jsonl", cwd: "/repo", hook_event_name: "UserPromptSubmit", prompt: "Fix the \"bug\"\nthen test" });
+  assert.deepEqual(parseHook(json), { prompt: "Fix the \"bug\"\nthen test", session: "s1", cwd: "/repo", event: "UserPromptSubmit" });
+  // The listing reads a bounded head of a long prompt: what is there is kept, a broken escape at the cut dropped.
+  const cut = json.slice(0, json.indexOf("then") + 2);
+  assert.equal(parseHook(cut).prompt, "Fix the \"bug\"\nth");
+  assert.equal(parseHook(`${json.slice(0, json.indexOf("\\n") + 1)}`).prompt, "Fix the \"bug\"");
+  assert.deepEqual(parseHook(""), { prompt: "", session: null, cwd: null, event: null });
+});
+
+test("meta lines", () => {
+  assert.deepEqual(parseMeta("tree=abc\nstarted=12\nsession=\nterminal=t3\n"), { tree: "abc", started: "12", session: "", terminal: "t3" });
+});
+
+const listing = (turns) => turns.map(({ id, start, end, json }) => `${RECORD}${id}\n`
+  + (start ? `${FILE}start.meta\n${start}` : "") + (end ? `${FILE}end.meta\n${end}` : "") + (json ? `${FILE}start.json\n${json}` : "")).join("");
+
+test("a listing → turns, newest first, an unfinished start snapshot left out", () => {
+  const out = listing([
+    { id: "100-000001", start: `tree=${A}\nstarted=100\nsession=s\nterminal=t1\n`, end: `tree=${B}\nended=130\n`, json: JSON.stringify({ prompt: "first" }) },
+    { id: "200-000002", start: `tree=${B}\nstarted=200\nsession=s\nterminal=\n`, json: JSON.stringify({ prompt: "second" }) },
+    { id: "300-000003", json: JSON.stringify({ prompt: "snapshot still being taken" }) },
+    { id: "junk" },
+  ]);
+  const turns = parseListing(out, "/turns/r");
+  assert.deepEqual(turns.map((t) => t.id), ["200-000002", "100-000001"]);
+  assert.deepEqual(turns[1], { id: "100-000001", dir: "/turns/r/100-000001", started: 100_000, ended: 130_000, startTree: A, endTree: B, session: "s", terminal: "t1", prompt: "first" });
+  assert.equal(turns[0].endTree, null);
+  assert.equal(turns[0].terminal, null);
+});
+
+test("where turns end: done, interrupted (the session went on), running", () => {
+  const t = (id, started, session, endTree = null) => ({ id, dir: `/d/${id}`, started, ended: endTree ? started + 5 : null, startTree: `${id}`.padEnd(40, "0"), endTree, session, terminal: session === "s1" ? "t1" : "t2" });
+  const turns = resolveEnds([t("1", 1, "s1", A), t("2", 2, "s1"), t("3", 3, "s2"), t("4", 4, "s1")]);
+  assert.deepEqual(turns.map((x) => [x.id, x.state]), [["4", "running"], ["3", "running"], ["2", "interrupted"], ["1", "done"]]);
+  const interrupted = turns.find((x) => x.id === "2");
+  assert.equal(interrupted.endTree, turns[0].startTree);
+  assert.equal(interrupted.endDir, "/d/4");
+  assert.equal(interrupted.ended, 4);
+  // A running turn is read up to now; the others against their end, in the end's folder.
+  assert.equal(turnSource(turns[0]).endTree, null);
+  assert.deepEqual(turnSource(interrupted), { kind: "turn", id: "2", dir: "/d/2", startTree: interrupted.startTree, endTree: turns[0].startTree, endDir: "/d/4", prompt: undefined });
+  assert.equal(pickTurn(turns, "t2").id, "3");
+  assert.equal(pickTurn(turns, "t9").id, "4");
+  assert.equal(pickTurn([], "t1"), null);
+  assert.equal(lastFinished(turns), null);
+  assert.equal(lastFinished(turns.slice(2)).id, "2");
+  assert.equal(lastFinished(turns, ["t2"]), null);
+});
+
+test("newest first, ties by name", () => {
+  assert.deepEqual(sortTurns([{ id: "1-1", started: 1 }, { id: "1-2", started: 1 }, { id: "0-9", started: 0 }]).map((t) => t.id), ["1-2", "1-1", "0-9"]);
+});
+
+test("a prompt's first line, and how long ago", () => {
+  assert.equal(firstLine("\n  Add the turn scope  \nand tests"), "Add the turn scope");
+  assert.equal(firstLine("x".repeat(100), 10), `${"x".repeat(9)}…`);
+  assert.equal(firstLine(null), "");
+  const now = 1_000_000_000;
+  assert.equal(ago(now - 5_000, now), "just now");
+  assert.equal(ago(now - 5 * 60_000, now), "5 min ago");
+  assert.equal(ago(now - 3 * 3600_000, now), "3 h ago");
+  assert.equal(ago(now - 86400_000, now), "1 day ago");
+});
+
+test("the settings snippet is JSON naming both hooks", () => {
+  const s = JSON.parse(hookSettings("/x/turn.sh"));
+  assert.equal(s.hooks.UserPromptSubmit[0].hooks[0].command, 'sh "/x/turn.sh" start');
+  assert.equal(s.hooks.Stop[0].hooks[0].command, 'sh "/x/turn.sh" stop');
+});
+
+// ——— the script ———
+
+const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+const hook = (home, event, input, env = {}) => spawnSync("sh", [SCRIPT, event], { input, encoding: "utf8", env: { ...process.env, HOME: home, ...env } });
+
+function repository() {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "walkthrough-turns-")));
+  git(dir, "init", "-q", "-b", "main");
+  git(dir, "config", "user.email", "t@t");
+  git(dir, "config", "user.name", "t");
+  writeFileSync(join(dir, "a.txt"), "a\n");
+  git(dir, "add", "-A");
+  git(dir, "commit", "-qm", "first");
+  return dir;
+}
+
+const folderOf = (home) => {
+  const base = join(home, ".herdr/walkthrough/turns");
+  return join(base, readdirSync(base).find((n) => !n.startsWith("input.")));
+};
+
+test("the script prints nothing and exits 0, in a repository or not", () => {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "walkthrough-home-")));
+  const outside = realpathSync(mkdtempSync(join(tmpdir(), "walkthrough-nogit-")));
+  for (const [event, input] of [["start", JSON.stringify({ cwd: outside, prompt: "x" })], ["stop", "not json"], ["bogus", ""]]) {
+    const r = hook(home, event, input);
+    assert.equal(r.status, 0);
+    assert.equal(r.stdout, "");
+    assert.equal(r.stderr, "");
+  }
+  rmSync(home, { recursive: true, force: true });
+  rmSync(outside, { recursive: true, force: true });
+});
+
+test("the script keeps a repository's newest 20 turns, each with its objects; the listing reads them back", () => {
+  const repo = repository(), home = realpathSync(mkdtempSync(join(tmpdir(), "walkthrough-home-")));
+  for (let i = 0; i < 22; i++) {
+    writeFileSync(join(repo, `new${i}.txt`), `${i}\n`); // something for each turn's objects to hold
+    assert.equal(hook(home, "start", JSON.stringify({ session_id: "s", cwd: repo, prompt: `turn ${i}` }), { HC_TERMINAL_ID: "t7" }).status, 0);
+  }
+  const folder = folderOf(home);
+  const names = readdirSync(folder).filter((n) => /^\d+-\d+$/.test(n));
+  assert.equal(names.length, 20);
+  for (const n of names) assert.ok(existsSync(join(folder, n, "objects")));
+  // Only the newest keeps an index to snapshot again.
+  assert.equal(names.filter((n) => existsSync(join(folder, n, "index"))).length, 1);
+  const turns = parseListing(execFileSync("sh", ["-c", LISTING, folder], { encoding: "utf8" }), folder);
+  assert.equal(turns.length, 20);
+  assert.ok(turns.every((t) => t.terminal === "t7" && t.session === "s" && /^turn \d+$/.test(t.prompt)));
+  rmSync(repo, { recursive: true, force: true });
+  rmSync(home, { recursive: true, force: true });
+});

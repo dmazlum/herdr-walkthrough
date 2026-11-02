@@ -6,6 +6,8 @@
 // a step written about the staged version is never quietly matched to an
 // unstaged one.
 
+import { firstLine } from "./turns.js";
+
 // Reads write nothing under .git: no index refresh, no lock, no fsmonitor.
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.quotePath=false", "-c", "diff.autoRefreshIndex=false"];
 // The user's diff settings (no prefixes, external tools, color) must not change what is parsed.
@@ -22,6 +24,7 @@ export const SCOPES = [
   { key: "branch", label: "Branch", about: "Everything this branch adds to its base, committed or not" },
   { key: "commit", label: "Commit", about: "One commit, against its first parent" },
   { key: "pr", label: "Pull request", about: "An open pull request on GitHub, as GitHub shows its changes (needs gh)" },
+  { key: "turn", label: "Last turn", about: "What an agent changed while answering one prompt (needs the turn hooks)" },
 ];
 
 export async function git(exec, cwd, args) {
@@ -62,6 +65,7 @@ export function sourceKey(source) {
   if (source.kind === "commit") return `commit:${source.hash}`;
   // Not pinned to the head commit: when the pull request moves on, its last walkthrough is shown as outdated.
   if (source.kind === "pr") return `pr:${source.number}`;
+  if (source.kind === "turn") return `turn:${source.id}`;
   return source.kind;
 }
 
@@ -73,6 +77,7 @@ export function describe(source, repo) {
     case "unstaged": return "Unstaged changes in the working tree, with new files.";
     case "branch": return `Everything branch "${source.head ?? repo?.branch ?? "HEAD"}" adds to "${source.base}", committed or not. Work that came in from ${source.base} is left out.`;
     case "commit": return `Commit ${source.hash.slice(0, 12)}${source.subject ? ` ("${source.subject}")` : ""}, against its first parent.`;
+    case "turn": return `One turn of a coding agent: what changed in the working tree while it answered the prompt "${firstLine(source.prompt, 160)}"${source.endTree ? "" : " (still running: read up to now)"}.`;
     case "pr": return `Pull request #${source.number}${source.title ? ` ("${source.title}")` : ""}${source.head && source.base ? `, "${source.head}" into "${source.base}"` : ""}, as GitHub shows its changes.`;
     default: return "Local changes.";
   }
@@ -96,16 +101,8 @@ export async function untracked(exec, top) {
   const take = paths.slice(0, MAX_UNTRACKED);
   if (!take.length) return { patches: [], unread };
 
-  // One call for every size and time: a stray 40 MB log must not reach the model or overflow exec.
-  // Exactly one line per file, in order ("-1" when it can't be read), so no size lands on the wrong path.
-  // GNU stat first: BSD's `stat -c` fails, while GNU's `stat -f` would succeed with something else.
-  const stats = await exec("sh", ["-c", "for f; do s=$(stat -c '%s %.9Y' \"$f\" 2>/dev/null || stat -f '%z %Fm' \"$f\" 2>/dev/null) || s=-1; echo \"${s:--1}\"; done", "sh", ...take], { cwd: top });
-  const lines = (stats.stdout ?? "").split("\n");
   const results = new Array(take.length).fill(null);
-  const queue = take.map((path, i) => {
-    const stamp = (lines[i] ?? "-1").trim();
-    return { path, i, stamp, size: Number(stamp.split(" ")[0]) };
-  });
+  const queue = await stamps(exec, top, take);
   const problems = new Array(take.length).fill(null);
   const worker = async () => {
     for (let item = queue.shift(); item; item = queue.shift()) {
@@ -128,6 +125,49 @@ export async function untracked(exec, top) {
   const patches = results.filter((p) => typeof p === "string" && p.trim());
   take.forEach((path, i) => { if (problems[i]) unread.push({ path, why: problems[i] }); });
   return { patches, unread };
+}
+
+/**
+ * Each file's size and modification time, in one call: a stray 40 MB log must
+ * not reach the model or overflow exec. Exactly one line per file, in order
+ * ("-1" when it can't be read), so no size lands on the wrong path. GNU stat
+ * first: BSD's `stat -c` fails, while GNU's `stat -f` would succeed with something else.
+ * @returns {Promise<{ path: string, i: number, stamp: string, size: number }[]>}
+ */
+async function stamps(exec, top, paths) {
+  const stats = await exec("sh", ["-c", "for f; do s=$(stat -c '%s %.9Y' \"$f\" 2>/dev/null || stat -f '%z %Fm' \"$f\" 2>/dev/null) || s=-1; echo \"${s:--1}\"; done", "sh", ...paths], { cwd: top });
+  const lines = (stats.stdout ?? "").split("\n");
+  return paths.map((path, i) => {
+    const stamp = (lines[i] ?? "-1").trim();
+    return { path, i, stamp, size: Number(stamp.split(" ")[0]) };
+  });
+}
+
+/**
+ * The tree the working tree is now, as `git add -A && git write-tree` would
+ * make it, against an index (a copy of the repository's) and an object folder
+ * of its own: the same snapshot as hooks/turn.sh, for a turn still running.
+ * The repository's objects are kept out of sight (git would update the time of
+ * any it found again), so the tree may name blobs only the repository has:
+ * a turn is always read with both. New files over 1 MB are left out, as a diff
+ * leaves them unread.
+ * @returns {Promise<string>} the tree's hash
+ */
+export async function snapshotTree(exec, top, { index, objects }) {
+  const real = (await must(exec, top, ["rev-parse", "--path-format=absolute", "--git-path", "index"])).trim();
+  // The repository's own index, copied once: its file stats spare re-reading every unchanged file.
+  await exec("sh", ["-c", '[ -f "$1" ] || [ ! -f "$0" ] || cp -p "$0" "$1"', real, index]);
+  const paths = (await must(exec, top, ["ls-files", "--others", "--exclude-standard", "-z"])).split("\0").filter(Boolean);
+  const big = paths.length ? (await stamps(exec, top, paths)).filter((s) => s.size > MAX_UNTRACKED_BYTES).map((s) => `:(exclude,literal)${s.path}`) : [];
+  const env = [`GIT_INDEX_FILE=${index}`, `GIT_OBJECT_DIRECTORY=${objects}`];
+  const run = async (args) => {
+    const r = await exec("env", [...env, "git", "-c", "core.fsmonitor=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false", ...args], { cwd: top });
+    if (r.code !== 0) throw new Error((r.stderr || `git ${args[0]} failed`).trim());
+    return (r.stdout ?? "").trim();
+  };
+  await exec("mkdir", ["-p", objects]);
+  await run(["add", "-A", "--", ".", ...big]);
+  return run(["write-tree", "--missing-ok"]);
 }
 
 /**
@@ -197,6 +237,15 @@ export async function loadSections(exec, top, source) {
     case "pr":
       add("pr", await gh(exec, top, ["pr", "diff", String(source.number), "--color=never"]));
       break;
+    case "turn": {
+      // The snapshots' objects live in the turns' own folders; git reads them as alternates beside the repository's.
+      const end = source.endTree ?? await snapshotTree(exec, top, { index: `${source.dir}/now.index`, objects: `${source.dir}/objects` });
+      const objects = [...new Set([source.dir, source.endDir ?? source.dir])].map((d) => `${d}/objects`).join(":");
+      const r = await exec("env", [`GIT_ALTERNATE_OBJECT_DIRECTORIES=${objects}`, "git", ...READ, "diff", ...DIFF, source.startTree, end], { cwd: top });
+      if (r.code !== 0) throw new Error(/bad object|not a tree|could not read/i.test(r.stderr ?? "") ? "This turn's snapshots are gone: only the newest 20 turns are kept." : (r.stderr || "git diff failed").trim());
+      add("turn", r.stdout ?? "");
+      break;
+    }
     default:
       throw new Error(`Unknown source "${source.kind}"`);
   }

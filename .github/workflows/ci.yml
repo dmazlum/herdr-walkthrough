@@ -30,6 +30,8 @@ jobs:
           node-version: ${{ matrix.node }}
       - name: Mod files parse
         run: for f in mods/walkthrough/*.js mods/walkthrough/lib/*.js; do node --check "$f" || exit 1; done
+      - name: Hook script parses
+        run: sh -n mods/walkthrough/hooks/turn.sh
       - name: Mod manifest and keys are JSON
         run: node -e "for (const f of ['mods/walkthrough/mod.json', 'keys.json']) JSON.parse(require('fs').readFileSync(f, 'utf8'))"
       # The git tests make throwaway repositories in a temporary folder.

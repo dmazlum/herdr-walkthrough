@@ -4,15 +4,17 @@
 //   entries/<key>.json     a finished walkthrough, named by everything that decides it
 //   pointers/<place>.json  the one shown last for a repository and source
 //   jobs/<place>/          a generation in progress (run.sh, prompt, answer)
+//   turns/<repo>/<turn>/   an agent's turn, written by hooks/turn.sh (see lib/turns.js)
 //   preferences.md         optional: the reader's own wishes, added to every prompt
 
-import { exec, home, readTextFile, writeTextFile } from "herdr";
+import { exec, home, appHome, readTextFile, writeTextFile } from "herdr";
 import { loadSections, sourceKey, describe, git, worthReading, ghError } from "./lib/sources.js";
 import { buildDigest } from "./lib/digest.js";
 import { buildPrompt } from "./lib/prompt.js";
 import { SCHEMA, normalize, VERSION } from "./lib/walkthrough.js";
 import { cacheKey, codeKey, placeKey, deadline, MAX_PROMPT_CHARS } from "./lib/cache.js";
 import { jobScript, readOutcome, isRunCommand } from "./lib/job.js";
+import { parseListing, resolveEnds, LISTING } from "./lib/turns.js";
 
 const MAX_ENTRIES = 200;
 export const dataDir = () => `${home()}/.herdr/walkthrough`;
@@ -38,7 +40,6 @@ export async function ensureDirs() {
   await exec("mkdir", ["-p", `${d}/entries`, `${d}/pointers`, `${d}/jobs`]);
 }
 
-/** Whether Claude Code's `claude` can be started: its version, or null. */
 /**
  * Puts text on the system clipboard. `exec` takes no input, so the text goes
  * through a file: pbcopy on macOS, else wl-copy or xclip.
@@ -69,6 +70,7 @@ export async function postComment(top, number, text) {
   return (r.stdout ?? "").trim().split("\n").pop() ?? "";
 }
 
+/** Whether Claude Code's `claude` can be started: its version, or null. */
 export async function claudeVersion() {
   try {
     const r = await exec("claude", ["--version"]);
@@ -144,6 +146,32 @@ async function touch(path) {
   await exec("touch", [path]).catch(() => undefined);
 }
 
+/** Whether a walkthrough with exactly this key is stored. */
+export const hasEntry = async (key) => (await readJson(entryPath(key)))?.version === VERSION;
+
+/** Where the installed hook script is, for the settings snippet: the mod's own folder. */
+export const hookScript = () => `${appHome()}/mods/walkthrough/hooks/turn.sh`;
+
+/**
+ * A repository's turns folder, named as hooks/turn.sh names it: the first 16
+ * digits of git's hash of the path. Made here so it can be watched before the first turn.
+ */
+export async function turnsFolder(top) {
+  const r = await exec("sh", ["-c", 'printf %s "$0" | git hash-object --stdin', top]);
+  const key = (r.stdout ?? "").trim().slice(0, 16);
+  if (r.code !== 0 || !/^[0-9a-f]{16}$/.test(key)) return null;
+  const dir = `${dataDir()}/turns/${key}`;
+  await exec("mkdir", ["-p", dir]).catch(() => undefined);
+  return dir;
+}
+
+/** A repository's turns, newest first, each with where it ended (lib/turns.js). */
+export async function listTurns(folder) {
+  if (!folder) return [];
+  const r = await exec("sh", ["-c", LISTING, folder]).catch(() => null);
+  return resolveEnds(parseListing(r?.stdout ?? "", folder));
+}
+
 /** The prompt that would be sent, to size it before anything is spent. */
 export function preparePrompt(diff, { language, previous, preferences = "" }) {
   return buildPrompt({ digest: diff.text, fileCount: diff.fileCount, hunkCount: diff.hunkCount, what: diff.what, language, previous, preferences });
@@ -162,7 +190,7 @@ export async function jobOf(repo, sk) {
 }
 
 /** Starts a generation in the background and returns its job. */
-export async function startJob(repo, diff, { key, model, language, prompt, source }) {
+export async function startJob(repo, diff, { key, model, language, prompt, source, auto = false }) {
   await ensureDirs();
   const dir = jobDir(placeKey(repo.top, diff.sk));
   // A run still going there (another window started it) is stopped, not orphaned.
@@ -171,7 +199,7 @@ export async function startJob(repo, diff, { key, model, language, prompt, sourc
   await exec("mkdir", ["-p", dir]);
   const meta = {
     key, code: codeKey(diff.files), model, language, top: repo.top, source, sk: diff.sk, started: Date.now(), deadline: Date.now() + deadline(diff.hunkCount),
-    idByAlias: diff.idByAlias, digestFiles: diff.digestFiles, hunkCount: diff.hunkCount,
+    idByAlias: diff.idByAlias, digestFiles: diff.digestFiles, hunkCount: diff.hunkCount, auto,
   };
   await writeTextFile(`${dir}/system.txt`, prompt.system, null);
   await writeTextFile(`${dir}/prompt.txt`, prompt.prompt, null);

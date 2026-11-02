@@ -1,0 +1,163 @@
+// The Last turn tab: the turns hooks/turn.sh recorded, which one is shown,
+// and the walkthroughs written for them without a click. Kept beside view.js;
+// each function takes the walkthrough view it works for.
+
+import { div } from "gpui-kit";
+import { v_flex, h_flex } from "gpui-base";
+import { agents, notify, settings, watchFolder } from "herdr";
+import { turnSource, pickTurn, lastFinished, firstLine, ago, hookSettings } from "./lib/turns.js";
+import { turnsFolder, listTurns, readDiff, readPreferences, keyFor, hasEntry, jobOf, preparePrompt, fits, startJob, finished, finishJob, copyText, hookScript } from "./engine.js";
+import { button, formatElapsed } from "./ui.js";
+
+// Written without a click only by the cheapest model, and only for a change small enough to be cheap.
+export const AUTO_MODEL = "haiku";
+export const AUTO_MAX_HUNKS = 300;
+export const AUTO = [
+  { key: "on-open", name: "While open", about: "When an agent's turn ends, and on opening, write its walkthrough with Haiku (300 hunks at most)" },
+  { key: "off", name: "Off", about: "Only when you press Generate" },
+];
+export const DEFAULT_AUTO = "on-open";
+export const autoOf = (key) => AUTO.find((a) => a.key === key) ?? AUTO[0];
+
+/** The repository's turns folder is found and watched; the newest turn is picked. */
+export async function startTurns(v, cx) {
+  v.turnsDir = await turnsFolder(v.repo.top);
+  await loadTurns(v);
+  if (!v.turnsDir) return;
+  cx.spawn(async () => {
+    for (;;) {
+      await watchFolder(v.turnsDir);
+      v.turnsDirty = true;
+    }
+  });
+}
+
+/**
+ * Lists the turns again. The one picked by hand stays picked; otherwise the
+ * newest (of the terminal the walkthrough opened over) is. Returns whether the
+ * shown turn is another one now, or the same one in another state.
+ */
+export async function loadTurns(v) {
+  v.turnsDirty = false;
+  const turns = await listTurns(v.turnsDir);
+  const before = v.turn;
+  v.turns = turns;
+  v.turn = (v.turnPinned && turns.find((t) => t.id === before?.id)) || pickTurn(turns, v.from);
+  if (!v.turn) v.turnPinned = false;
+  return before?.id !== v.turn?.id || before?.state !== v.turn?.state || before?.endTree !== v.turn?.endTree;
+}
+
+/** The toolbar's turn dropdown face. */
+export const turnLabel = (v) => (v.turn ? firstLine(v.turn.prompt, 48) || "(empty prompt)" : "Pick a turn");
+
+function stateOf(t) {
+  if (t.state === "running") return "still running";
+  if (t.state === "interrupted") return "interrupted";
+  return t.ended ? `took ${formatElapsed(t.ended - t.started)}` : "finished";
+}
+
+export const turnItems = (v) => v.turns.map((t) => ({
+  label: firstLine(t.prompt, 72) || "(empty prompt)",
+  hint: [ago(t.started), stateOf(t), t.terminal].filter(Boolean).join(" · "),
+  right: t.state === "running" ? "running" : "",
+  value: t, selected: t.id === v.turn?.id,
+}));
+
+/** A turn picked from the dropdown stays picked until the newest is picked again. */
+export function chooseTurn(v, turn) {
+  v.turn = turn;
+  v.turnPinned = turn.id !== v.turns[0]?.id;
+}
+
+/**
+ * The once-a-second part: a turns folder that changed is listed again, an
+ * agent of this tab that stopped working has its turn written up, and
+ * walkthroughs written in the background are stored and announced.
+ */
+export async function turnTick(v, cx) {
+  if (v.turnsDirty && await loadTurns(v) && v.scope === "turn") await v.reload(cx);
+  if (v.auto !== "off") {
+    if (agentStopped(v)) v.autoWanted = Date.now();
+    if (v.autoWanted) {
+      // The Stop hook writes the turn's end a moment after the agent reports it is done.
+      const turn = lastFinished(v.turns, agents().filter((a) => a.tab === v.tab).map((a) => a.address));
+      if (turn && turn.ended >= v.autoWanted - 60_000) { v.autoWanted = null; await autoGenerate(v, cx, turn); }
+      else if (Date.now() - v.autoWanted > 20_000) v.autoWanted = null;
+    }
+  }
+  for (const b of [...v.background]) {
+    const done = await finished(b.job);
+    if (!done && Date.now() < b.job.meta.deadline + 10_000) continue;
+    v.background = v.background.filter((x) => x !== b);
+    if (!done) continue; // run.sh stopped it; the folder is cleared the next time that turn is opened
+    try {
+      // null: the view itself (or another window) took the answer, and says so.
+      if (await finishJob(done)) announce(b.turn);
+    } catch (e) {
+      notify({ title: "Walkthrough", body: `Couldn't write the walkthrough of "${firstLine(b.turn.prompt, 60)}": ${String(e?.message ?? e)}`, level: "warning" });
+    }
+    if (v.diff?.sk === done.meta.sk) await v.reload(cx);
+  }
+}
+
+/** In a pane only: whether an agent in this tab has just stopped working. */
+function agentStopped(v) {
+  if (v.inDialog || !v.tab) return false;
+  let stopped = false;
+  for (const a of agents().filter((x) => x.tab === v.tab)) {
+    if (v.statuses.get(a.address) === "working" && (a.status === "done" || a.status === "idle")) stopped = true;
+    v.statuses.set(a.address, a.status);
+  }
+  return stopped;
+}
+
+export function announce(turn) {
+  notify({ title: "Walkthrough ready", body: `Last turn: "${firstLine(turn?.prompt, 60) || "(empty prompt)"}"`, level: "success" });
+}
+
+/**
+ * Writes the walkthrough of a finished turn that has none yet, with Haiku, in
+ * the background. Once per turn per open walkthrough; never past
+ * AUTO_MAX_HUNKS, where Generate is waited for.
+ */
+export async function autoGenerate(v, cx, turn) {
+  if (v.auto === "off" || !v.claude || !v.repo || !turn || turn.state === "running" || v.autoTried.has(turn.id)) return;
+  v.autoTried.add(turn.id);
+  try {
+    const source = turnSource(turn);
+    const diff = await readDiff(v.repo, source);
+    if (!diff.hunkCount || diff.hunkCount > AUTO_MAX_HUNKS) return;
+    const preferences = await readPreferences();
+    // One by the model picked here counts too: it is the one that would be shown.
+    const key = keyFor(v.repo, diff, AUTO_MODEL, v.language, preferences);
+    if (await hasEntry(key) || await hasEntry(keyFor(v.repo, diff, v.model, v.language, preferences))) return;
+    if (await jobOf(v.repo, diff.sk)) return;
+    const prompt = preparePrompt(diff, { language: v.language, previous: null, preferences });
+    if (!fits(prompt)) return;
+    const job = await startJob(v.repo, diff, { key, model: AUTO_MODEL, language: v.language, prompt, source, auto: true });
+    if (v.diff?.sk === diff.sk) v.setJob(job);
+    else v.background.push({ job, turn });
+  } catch {
+    // A turn that can't be read now is read when it is opened, with its error.
+  }
+  cx.notify();
+}
+
+/** The Last turn tab before any turn was recorded: what the hooks do and the settings to add. */
+export function hookHelp(v, t) {
+  const snippet = hookSettings(hookScript());
+  const font = settings().font_family ?? "JetBrains Mono";
+  return v_flex().id("turn-help").size_full().overflow_y_scrollbar().items_center().p(28)
+    .child(v_flex().w_full().max_w(620).gap(12)
+      .child(div().text_size(18).font_semibold().child("No turns recorded in this repository yet"))
+      .child(div().text_size(13).text_color(t.muted).child("Last turn reads what an agent changed while answering one prompt. Two Claude Code hooks record it: one takes a snapshot of the working tree when you send a prompt, the other when the agent stops. Snapshots go to ~/.herdr/walkthrough/turns/, never into the repository's .git; the newest 20 per repository are kept."))
+      .child(div().text_size(13).text_color(t.muted).child("Add these to ~/.claude/settings.json, beside any hooks you already have. The walkthrough doesn't change your settings itself. Turns are recorded from the next prompt on."))
+      .child(v_flex().w_full().p(10).rounded(8).border_1().border_color(t.border).bg(t.raised).font_family(font).text_size(11.5)
+        .children(snippet.split("\n").map((line) => div().whitespace_nowrap().child(line || " "))))
+      .child(h_flex().gap(10).items_center()
+        .child(button(t, "copy-hooks", "Copy settings", (_e, cx) => cx.spawn(async (cx) => {
+          try { await copyText(snippet); v.sent = "Copied the hook settings."; } catch (e) { v.sent = `Couldn't copy: ${String(e?.message ?? e)}`; }
+          cx.notify();
+        }), { kind: "solid", small: true }))
+        .when(Boolean(v.sent), (e) => e.child(div().text_size(11.5).text_color(t.dim).child(v.sent)))));
+}

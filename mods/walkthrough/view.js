@@ -15,6 +15,8 @@ import { formatComments, addComment, sameSpot } from "./lib/comments.js";
 import { toMarkdown } from "./lib/export.js";
 import { readDiff, readPreferences, matters, keyFor, findShown, preparePrompt, fits, promptChars, jobOf, startJob, alive, finished, cancelJob, finishJob, copyText, postComment, claudeVersion, systemLocale, ensureDirs } from "./engine.js";
 import { button, chip, menu, picker, formatElapsed, formatTokens } from "./ui.js";
+import { turnSource } from "./lib/turns.js";
+import { AUTO, DEFAULT_AUTO, autoOf, startTurns, loadTurns, turnLabel, turnItems, chooseTurn, turnTick, autoGenerate, announce, hookHelp } from "./turnview.js";
 
 const PREFS = "walkthrough.prefs";
 // Lines drawn on one page; a step past this says how many it leaves out.
@@ -61,6 +63,8 @@ export class Walkthrough {
     this.space = here.space;
     this.remote = Boolean(here.space?.machine);
     this.from = here.terminal; // the terminal it was opened over: comments go to its agent first
+    this.inDialog = Boolean(p.overlay);
+    this.tab = (p.pane && panes().find((x) => x.pane === p.pane)?.tab) || focused()?.tab || null; // a pane watches this tab's agents
     const saved = prefs();
     this.scope = SCOPES.some((s) => s.key === p.scope) ? p.scope : SCOPES.some((s) => s.key === saved.scope) ? saved.scope : "uncommitted";
     this.model = MODELS.some((m) => m.key === saved.model) ? saved.model : DEFAULT_MODEL;
@@ -73,6 +77,14 @@ export class Walkthrough {
     this.pr = null;
     this.prs = null; // null until listed
     this.prError = null;
+    this.turn = null; // Last turn: the one shown (lib/turns.js), picked by hand when turnPinned
+    this.turns = [];
+    this.turnPinned = false;
+    this.auto = AUTO.some((a) => a.key === saved.autoGenerate) ? saved.autoGenerate : DEFAULT_AUTO;
+    this.autoTried = new Set(); // turns already considered for a walkthrough without a click
+    this.autoWanted = null;
+    this.statuses = new Map(); // this tab's agents' last status
+    this.background = []; // walkthroughs written without a click for a turn not shown: { job, turn }
     this.confirmPost = false;
     this.posting = false;
     this.claude = undefined;
@@ -124,8 +136,10 @@ export class Walkthrough {
       this.commits = commits;
       this.commit = commits[0] ?? null;
       if (this.scope === "pr") await this.loadPullRequests();
+      await startTurns(this, cx);
       await this.reload(cx);
       this.watch(cx);
+      await autoGenerate(this, cx, this.turns.find((x) => x.state !== "running"));
     });
     cx.timer.every(1000, (cx) => this.tick(cx));
     // Commands for keys.json: walkthrough.generate, .cancel, .next, .prev, .copy.
@@ -147,6 +161,7 @@ export class Walkthrough {
     if (this.scope === "branch") return this.base ? { kind: "branch", base: this.base, head: this.head ?? this.repo?.branch ?? "HEAD" } : null;
     if (this.scope === "commit") return this.commit ? { kind: "commit", hash: this.commit.hash, subject: this.commit.subject } : null;
     if (this.scope === "pr") return this.pr ? { kind: "pr", number: this.pr.number, title: this.pr.title, head: this.pr.head, base: this.pr.base } : null;
+    if (this.scope === "turn") return this.turn ? turnSource(this.turn) : null;
     return { kind: this.scope };
   }
 
@@ -220,8 +235,8 @@ export class Walkthrough {
     const loop = (folder) => cx.spawn(async (cx) => {
       for (;;) {
         const changed = await watchFolder(folder);
-        // A commit or a pull request doesn't change with the working tree.
-        if (this.scope !== "commit" && this.scope !== "pr" && !this.dirty && await matters(top, changed, gitDir)) this.dirty = true;
+        // A commit, a pull request or a finished turn doesn't change with the working tree.
+        if (this.scope !== "commit" && this.scope !== "pr" && !(this.scope === "turn" && this.turn?.state !== "running") && !this.dirty && await matters(top, changed, gitDir)) this.dirty = true;
       }
     });
     loop(top);
@@ -273,6 +288,7 @@ export class Walkthrough {
         try {
           // null: another window took the answer; it is stored in a moment, and a later read finds it.
           lost = (await finishJob(job)) === null;
+          if (!lost && job.meta.auto) announce(this.turn);
           this.genError = null;
         } catch (e) { this.genError = String(e?.message ?? e); }
         await this.reload(cx);
@@ -280,6 +296,7 @@ export class Walkthrough {
       } else if (this.dirty && !this.loading) {
         await this.reload(cx);
       }
+      await turnTick(this, cx);
     } finally {
       this.ticking = false;
     }
@@ -353,6 +370,7 @@ export class Walkthrough {
     cx.spawn(async (cx) => {
       // Listed again each time the tab is picked: pull requests open, close and move on GitHub.
       if (key === "pr") { cx.notify(); await this.loadPullRequests(); }
+      if (key === "turn") await loadTurns(this);
       await this.reload(cx);
     });
   }
@@ -379,6 +397,8 @@ export class Walkthrough {
     if (kind === "base") { this.base = value; savePrefs({ bases: { ...(prefs().bases ?? {}), [this.repo.top]: value } }); }
     if (kind === "commit") this.commit = value;
     if (kind === "pr") { this.pr = value; this.confirmPost = false; }
+    if (kind === "turn") chooseTurn(this, value);
+    if (kind === "auto") { this.auto = value; this.loading = false; savePrefs({ autoGenerate: value }); cx.notify(); return; }
     if (kind === "agent") { this.agentTo = value; cx.notify(); return; }
     cx.spawn(async (cx) => this.reload(cx));
   }
@@ -531,6 +551,8 @@ export class Walkthrough {
         .child(picker(t, "pick-base", this.base ?? "Pick a base", open("base"))))
       .when(this.scope === "commit", (el) => el.child(picker(t, "pick-commit", this.commit ? `${this.commit.short} ${this.commit.subject}` : "Pick a commit", open("commit"))))
       .when(this.scope === "pr" && Boolean(this.prs?.length), (el) => el.child(picker(t, "pick-pr", this.pr ? `#${this.pr.number} ${this.pr.title}` : "Pick a pull request", open("pr"))))
+      .when(this.scope === "turn" && this.turns.length > 0, (el) => el.child(picker(t, "pick-turn", turnLabel(this), open("turn")))
+        .child(picker(t, "pick-auto", `Auto: ${autoOf(this.auto).name.toLowerCase()}`, open("auto"), { tooltip: "Write the last turn's walkthrough without a click" })))
       .child(div().flex_1())
       .when(this.loading, (el) => el.child(div().text_size(11).text_color(t.dim).frames(["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"], 90)))
       .child(picker(t, "pick-model", modelOf(this.model).name, open("model"), { tooltip: "Model" }))
@@ -549,6 +571,8 @@ export class Walkthrough {
       case "commit": return { side: "left", width: 460, items: this.commits.map((c) => ({ label: `${c.short}  ${c.subject}`, hint: `${c.author} · ${c.when}`, value: c, selected: c.hash === this.commit?.hash })) };
       case "pr": return { side: "left", width: 480, items: (this.prs ?? []).map((p) => ({
         label: `#${p.number}  ${p.title}`, hint: `${p.author} · ${p.head} → ${p.base}${p.draft ? " · draft" : ""}${p.current ? " · this branch" : ""}`, value: p, selected: p.number === this.pr?.number })) };
+      case "turn": return { side: "left", width: 480, items: turnItems(this) };
+      case "auto": return { side: "left", width: 340, items: AUTO.map((a) => ({ label: a.name, hint: a.about, value: a.key, selected: a.key === this.auto })) };
       case "model": return { side: "right", width: 280, items: MODELS.map((m) => ({ label: m.name, hint: m.about, value: m.key, selected: m.key === this.model })) };
       case "language": return { side: "right", width: 220, items: LANGUAGES.map((l) => ({ label: l.name, right: l.english === l.name ? "" : l.english, value: l.tag, selected: l.tag === this.language })) };
       case "agent": {
@@ -605,9 +629,10 @@ export class Walkthrough {
     if (this.scope === "pr" && this.prError) return center("Couldn't list the pull requests.", this.prError);
     if (this.scope === "pr" && this.prs === null) return center("Reading the pull requests…");
     if (this.scope === "pr" && !this.prs.length) return center("No open pull requests.", "This repository has none open on GitHub.");
+    if (this.scope === "turn" && !this.turns.length) return hookHelp(this, t);
     if (!this.source()) return center(this.scope === "branch" ? "Pick the branch to compare with." : this.scope === "pr" ? "Pick a pull request." : "Pick a commit.", "Nothing is read or generated until you do.");
     if (!this.diff) return center("Reading the diff…");
-    if (!this.diff.files.length) return center("Nothing to walk through.", `No ${SCOPES.find((s) => s.key === this.scope)?.label.toLowerCase()} changes${this.scope === "branch" ? ` against ${this.base}` : ""}.`);
+    if (!this.diff.files.length) return center("Nothing to walk through.", this.scope === "turn" ? (this.turn?.state === "running" ? "This turn hasn't changed any files yet." : "This turn changed no files.") : `No ${SCOPES.find((s) => s.key === this.scope)?.label.toLowerCase()} changes${this.scope === "branch" ? ` against ${this.base}` : ""}.`);
     if (!this.view) return this.job ? this.progress(t) : this.intro(t);
     // A narrow pane gives the page the room; the footer still moves between steps.
     return h_flex().size_full().items_start()
