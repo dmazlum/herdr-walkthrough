@@ -146,7 +146,9 @@ Add them to `~/.claude/settings.json`, next to any hooks you already have:
 }
 ```
 
-Turns are recorded from the next prompt on. Pick any of the last 20 by their prompt. The
+Turns are recorded from the next prompt on. Pick any of the last 20 by their prompt.
+(A background task's notification, which Claude Code also sends as a prompt, starts no
+turn: the work it leads to counts as the turn it came in.) The
 prompt goes to the model too, so the steps are explained against what was asked.
 
 **When a turn has no clean end.** Stop a turn with Esc, or quit the agent mid-turn, and

@@ -385,7 +385,9 @@ path of the installed copy (a renamed folder keeps its new name):
 With a no, say the tab shows the same settings and a Copy button. The mod itself never
 writes the settings.
 
-`turn.sh start` (UserPromptSubmit) saves stdin unparsed as `start.json` in
+`turn.sh start` (UserPromptSubmit) ignores a prompt starting `<task-notification>` (a
+background task's notification: the session's turn goes on, and its next Stop ends it
+again). Otherwise it saves stdin unparsed as `start.json` in
 `turns/<repo>/<seconds>-<pid>/`, snapshots the working tree and writes `start.meta`
 (`tree=`, `started=`, `session=`, `terminal=$HC_TERMINAL_ID`) last; then keeps the
 newest 20 turns, removing older folders with their `objects/`. Before the snapshot it

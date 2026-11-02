@@ -258,3 +258,22 @@ test("a new turn drops the indexes of ended turns and of its session's earlier o
   rmSync(repo, { recursive: true, force: true });
   rmSync(home, { recursive: true, force: true });
 });
+
+test("a background task's notification is no prompt: it starts no turn, and the turn it came during goes on", () => {
+  const repo = repository(), home = realpathSync(mkdtempSync(join(tmpdir(), "walkthrough-home-")));
+  const input = (prompt) => JSON.stringify({ session_id: "s", cwd: repo, prompt });
+  hook(home, "start", input("Make a TWO"));
+  writeFileSync(join(repo, "a.txt"), "TWO\n");
+  // Claude Code sends it as a prompt, with escapes, while the agent works or once it stopped.
+  hook(home, "start", input("<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>"));
+  writeFileSync(join(repo, "b.txt"), "after the notification\n");
+  hook(home, "stop", input(""));
+  const folder = folderOf(home);
+  const names = readdirSync(folder).filter((n) => /^\d+-\d+$/.test(n));
+  assert.equal(names.length, 1);
+  const [turn] = parseListing(execFileSync("sh", ["-c", LISTING, folder], { encoding: "utf8" }), folder);
+  assert.equal(turn.prompt, "Make a TWO");
+  assert.ok(turn.endTree);
+  rmSync(repo, { recursive: true, force: true });
+  rmSync(home, { recursive: true, force: true });
+});
