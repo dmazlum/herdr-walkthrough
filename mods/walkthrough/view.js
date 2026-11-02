@@ -2,21 +2,22 @@
 // time, with the code each step talks about under it.
 
 import { div } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input, VirtualListScrollHandle } from "gpui-base";
+import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, VirtualListScrollHandle } from "gpui-base";
 import { spaces, panes, focused, agents, theme, props, closeOverlay, hc, exec, nextCommand, settings, shared, setShared, watchFolder } from "herdr";
-import { SCOPES, repoAt, currentHead, defaultBase, baseChoices, recentCommits, pullRequests } from "./lib/sources.js";
-import { overlay, fileTotals } from "./lib/walkthrough.js";
+import { SCOPES, repoAt, currentHead, defaultBase, baseChoices, recentCommits, pullRequests, sourceKey, commitMessage, taskSince } from "./lib/sources.js";
+import { overlay, fileTotals, overlayAsks, asksOf } from "./lib/walkthrough.js";
+import { TASK_MODES, taskChoice, resolveTask, taskKey, taskCacheKey, clip, MAX_TASK_CHARS } from "./lib/task.js";
 import { numberLines } from "./lib/hunks.js";
 import { tokenize } from "./lib/highlight.js";
 import { LANGUAGES, languageOf, fromLocale } from "./lib/languages.js";
 import { MODELS, DEFAULT_MODEL, modelOf } from "./lib/job.js";
-import { estimateTokens, codeKey, MAX_PROMPT_CHARS } from "./lib/cache.js";
+import { estimateTokens, codeKey, placeKey, MAX_PROMPT_CHARS } from "./lib/cache.js";
 import { formatComments, addComment, sameSpot } from "./lib/comments.js";
 import { toMarkdown } from "./lib/export.js";
 import { readKey, hunkRead, isRead, markStep, unmarkStep, mergeRead, changedSince } from "./lib/read.js";
-import { readDiff, readPreferences, matters, keyFor, findShown, preparePrompt, fits, promptChars, jobOf, startJob, alive, finished, cancelJob, finishJob, copyText, postComment, claudeVersion, systemLocale, ensureDirs, loadRead, saveRead } from "./engine.js";
+import { readDiff, readPreferences, matters, keyFor, findShown, preparePrompt, fits, promptChars, jobOf, startJob, alive, finished, cancelJob, finishJob, copyText, postComment, claudeVersion, systemLocale, ensureDirs, loadRead, saveRead, transcriptMessages } from "./engine.js";
 import { button, chip, menu, picker, formatElapsed, formatTokens } from "./ui.js";
-import { turnSource, isOpen } from "./lib/turns.js";
+import { turnSource, isOpen, firstLine } from "./lib/turns.js";
 import { AUTO, DEFAULT_AUTO, autoOf, startTurns, loadTurns, turnLabel, turnItems, chooseTurn, turnTick, autoGenerate, announce, hookHelp } from "./turnview.js";
 
 const PREFS = "walkthrough.prefs";
@@ -55,6 +56,14 @@ const scopeName = (scope) => (scope === "staged" ? "staged" : scope === "working
 
 const prefs = () => /** @type {any} */ (shared(PREFS)) ?? {};
 const savePrefs = (change) => setShared(PREFS, { ...prefs(), ...change });
+// Task choices are kept per repository and source; past this many the oldest go.
+const MAX_TASK_CHOICES = 100;
+const COVERAGE_MARK = { seen: "✓", partly: "◐", absent: "○" };
+const COVERAGE_ABOUT = {
+  seen: "The diff carries this request out",
+  partly: "The diff carries out part of this request",
+  absent: "Nothing in this diff carries this request out",
+};
 
 export class Walkthrough {
   init(cx) {
@@ -93,6 +102,12 @@ export class Walkthrough {
     this.cacheKey = null;
     this.shown = null; // { entry, exact }
     this.view = null;
+    this.task = null; // the task the shown source is matched against (lib/task.js), or null
+    this.taskView = null; // the shown walkthrough's requests over the diff (overlayAsks), null when it has none
+    this.commitTexts = new Map(); // commit messages read, by hash
+    this.promptMemo = null; // { since, at, list }: prompts read from transcripts, briefly kept
+    this.editingTask = false;
+    this.showTaskText = false;
     this.job = null;
     this.jobSeq = 0; // bumped whenever this view starts, ends or drops a job
     this.starting = false;
@@ -118,10 +133,16 @@ export class Walkthrough {
     this.handle = cx.focus_handle();
     this.handle.focus();
     this.input = InputState.new({ placeholder: "Comment on this line, then Enter" });
-    this.typing = false;
-    this.input.on("focus", (_e, cx) => { this.typing = true; cx.notify(); });
+    this.typing = false; // false, or the input typed in: "comment" or "task"
+    this.input.on("focus", (_e, cx) => { this.typing = "comment"; cx.notify(); });
     this.input.on("blur", (_e, cx) => { this.typing = false; cx.notify(); });
     this.input.on("submit", (_e, cx) => { this.saveComment(); cx.notify(); });
+    this.taskText = TextareaState.new({ placeholder: "What should this change do? One request per line works best.", rows: 4 });
+    this.taskText.set_auto_grow(3, 10);
+    this.taskText.on("focus", (_e, cx) => { this.typing = "task"; cx.notify(); });
+    this.taskText.on("blur", (_e, cx) => { this.typing = false; cx.notify(); });
+    this.taskText.on("change", (_e, cx) => cx.notify());
+    this.taskText.on("submit", (_e, cx) => this.saveTaskText(cx));
 
     cx.spawn(async (cx) => {
       if (!this.folder || this.remote) { this.repo = null; cx.notify(); return; }
@@ -146,7 +167,7 @@ export class Walkthrough {
       await autoGenerate(this, cx, this.turn); // the turn the tab shows: this terminal's newest, else the newest
     });
     cx.timer.every(1000, (cx) => this.tick(cx));
-    // Commands for keys.json: walkthrough.generate, .cancel, .next, .prev, .copy, .unread.
+    // Commands for keys.json: walkthrough.generate, .cancel, .next, .prev, .copy, .unread, .task (write your own).
     cx.spawn(async (cx) => {
       for (;;) {
         const name = String(await nextCommand()).replace(/^walkthrough\./, "").split(":")[0];
@@ -156,6 +177,7 @@ export class Walkthrough {
         else if (name === "prev") this.move(-1);
         else if (name === "copy") await this.copy(cx);
         else if (name === "unread") this.unreadOnly = !this.unreadOnly;
+        else if (name === "task") this.chooseTask("own", cx);
         cx.notify();
       }
     });
@@ -168,6 +190,74 @@ export class Walkthrough {
     if (this.scope === "pr") return this.pr ? { kind: "pr", number: this.pr.number, title: this.pr.title, head: this.pr.head, base: this.pr.base } : null;
     if (this.scope === "turn") return this.turn ? turnSource(this.turn) : null;
     return { kind: this.scope };
+  }
+
+  /** The task choice made for a source (by its key): found, the reader's own, or off. */
+  taskChoiceFor(sk) {
+    return taskChoice(this.repo && sk ? prefs().tasks?.[placeKey(this.repo.top, sk)] : null);
+  }
+
+  saveTaskChoice(sk, choice) {
+    const place = placeKey(this.repo.top, sk);
+    const tasks = { ...(prefs().tasks ?? {}) };
+    delete tasks[place];
+    // Your own words are kept while Found or Off is tried; only an empty text leaves nothing to keep.
+    if (choice.mode !== "auto" || choice.text) tasks[place] = choice;
+    const keys = Object.keys(tasks);
+    for (const k of keys.slice(0, Math.max(0, keys.length - MAX_TASK_CHOICES))) delete tasks[k];
+    savePrefs({ tasks });
+  }
+
+  /**
+   * The task a source is matched against, or null. Reading it never fails the
+   * walkthrough: a task that can't be read is no task, and the walkthrough is
+   * written as it always was.
+   */
+  async taskFor(source) {
+    const repo = this.repo;
+    if (!repo || !source) return null;
+    const choice = this.taskChoiceFor(sourceKey(source));
+    if (choice.mode !== "auto") return resolveTask({ mode: choice.mode, own: choice.text, source });
+    try {
+      switch (source.kind) {
+        case "turn": return resolveTask({ source, turn: this.turns.find((t) => t.id === source.id) ?? null, turns: this.turns });
+        case "pr": return resolveTask({ source, pr: (this.prs ?? []).find((p) => p.number === source.number) ?? null });
+        case "commit":
+          if (!this.commitTexts.has(source.hash)) {
+            // null: git couldn't read it this time; it is asked again on the next read, not remembered as no message.
+            const message = await commitMessage(exec, repo.top, source.hash);
+            if (message === null) return null;
+            if (this.commitTexts.size >= 200) this.commitTexts.clear();
+            this.commitTexts.set(source.hash, message);
+          }
+          return resolveTask({ source, commit: this.commitTexts.get(source.hash) });
+        default: {
+          const { since, label } = await taskSince(exec, repo.top, source);
+          return resolveTask({ source, prompts: await this.promptsSince(since), since: label });
+        }
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * What people typed into agents in this repository since `since`: Claude
+   * Code's transcripts, else the turns the hooks recorded. A save re-reads the
+   * diff, so the transcripts are read at most every few seconds.
+   */
+  async promptsSince(since) {
+    const m = this.promptMemo;
+    if (m && m.since === since && Date.now() - m.at < 5000) return m.list;
+    let list = await transcriptMessages(this.repo.top, since);
+    if (!list.length) list = this.turns.filter((t) => t.started >= since).map((t) => ({ at: t.started, text: t.prompt })).sort((a, b) => a.at - b.at);
+    this.promptMemo = { since, at: Date.now(), list };
+    return list;
+  }
+
+  /** The first page: the task's, when the shown walkthrough was matched against one. */
+  firstPage() {
+    return this.taskView ? -1 : 0;
   }
 
   /** Re-reads the diff and what to show for it. A newer reload wins over an older one still running. */
@@ -187,34 +277,39 @@ export class Walkthrough {
       repo.branch = detached ? null : head;
       const source = this.source();
       if (!source) {
-        this.diff = null; this.shown = null; this.view = null;
+        this.diff = null; this.shown = null; this.view = null; this.task = null; this.taskView = null;
         if (jobSeq === this.jobSeq) this.job = null;
       } else {
-        const diff = await readDiff(repo, source);
-        const preferences = await readPreferences();
-        const key = keyFor(repo, diff, this.model, this.language, preferences);
+        // The task is read beside the diff, not after it: a save re-reads both.
+        const [diff, preferences, task] = await Promise.all([readDiff(repo, source), readPreferences(), this.taskFor(source)]);
+        const key = keyFor(repo, diff, this.model, this.language, preferences, task);
         const [shown, job, read] = await Promise.all([findShown(repo, diff, key), jobOf(repo, diff.sk), loadRead(repo.top)]);
         if (seq !== this.seq) return;
         // Another window on this repository may have marked hunks; marks made here and not yet written stay.
         this.read = mergeRead(read, this.read, this.readChanged);
         // The size of exactly the prompt Generate would send, so the intro and the check agree.
-        this.promptSize = promptChars(preparePrompt(diff, { language: this.language, previous: this.previousFor(shown), preferences }));
+        this.promptSize = promptChars(preparePrompt(diff, { language: this.language, previous: this.previousFor(shown), preferences, task }));
+        this.task = task;
         const before = this.shown?.entry?.key + String(this.shown?.entry?.generatedAt);
         // A comment box belongs to a line of the diff it was opened on.
-        if (this.diff?.sk !== diff.sk) this.target = null;
+        // So does the task editor: what it holds is another source's task.
+        if (this.diff?.sk !== diff.sk) { this.target = null; if (this.editingTask) this.closeTaskEditor(); }
         this.diff = diff;
         this.cacheKey = key;
         this.shown = shown;
         // A job this view started or ended while reading is newer than what the read found.
         if (jobSeq === this.jobSeq && !this.starting) this.job = job;
         this.view = shown ? overlay(shown.entry.walkthrough, diff.files) : null;
-        // Another walkthrough is another reading path: it opens on its first step not yet read.
+        this.taskView = this.view ? overlayAsks(shown.entry.walkthrough.asks, this.view) : null;
+        // Another walkthrough is another reading path: it opens on its first step not yet read,
+        // or on its task while none of it is read.
         if (before !== shown?.entry?.key + String(shown?.entry?.generatedAt)) {
           const first = this.view?.steps.findIndex((st) => !isRead(st, this.read)) ?? -1;
-          this.step = Math.max(0, first);
+          this.step = this.taskView && !this.view.steps.some((st) => isRead(st, this.read)) ? -1 : Math.max(0, first);
           this.openFiles = new Set();
+          this.showTaskText = false;
         }
-        if (this.view) this.step = Math.min(this.step, this.view.steps.length);
+        if (this.view) this.step = Math.max(this.firstPage(), Math.min(this.step, this.view.steps.length));
       }
       this.error = null;
     } catch (e) {
@@ -351,18 +446,20 @@ export class Walkthrough {
     this.genError = null;
     const previous = this.previousFor(this.shown);
     const model = this.model, language = this.language;
+    // The task the last read found, beside the diff it found it with.
+    const task = this.task;
     const preferences = await readPreferences();
-    const prompt = preparePrompt(diff, { language, previous, preferences });
+    const prompt = preparePrompt(diff, { language, previous, preferences, task });
     if (!fits(prompt)) {
       this.genError = `This diff is too large to send whole (≈ ${formatTokens(estimateTokens(promptChars(prompt)))} tokens; the limit is ≈ ${formatTokens(estimateTokens(MAX_PROMPT_CHARS))}). Pick a narrower scope.`;
       return;
     }
     try {
       // The key of exactly what is sent, not of whatever the last read saw.
-      const key = keyFor(repo, diff, model, language, preferences);
+      const key = keyFor(repo, diff, model, language, preferences, task);
       // The hunks of what is shown now: whatever of them was read and is gone has changed since.
       const before = (this.shown?.entry.walkthrough.parts ?? []).flatMap((p) => p.steps.flatMap((st) => st.hunkIds));
-      this.setJob(await startJob(repo, diff, { key, model, language, prompt, source, before }));
+      this.setJob(await startJob(repo, diff, { key, model, language, prompt, source, before, task }));
     } catch (err) {
       this.genError = `Couldn't start claude: ${String(err?.message ?? err)}`;
     }
@@ -376,16 +473,17 @@ export class Walkthrough {
     cx.notify();
   }
 
+  /** -1 is the task's page (when there is one), steps.length Not covered. */
   go(index) {
     const steps = this.view?.steps ?? [];
-    this.step = Math.max(0, Math.min(steps.length, index));
+    this.step = Math.max(this.firstPage(), Math.min(steps.length, index));
     this.target = null;
   }
 
   /**
    * One step on or back. Moving on from a step marks it read; with unread only
    * on, read steps are passed over (on past the last is Not covered, back
-   * before the first stays put).
+   * before the first is the task's page, or stays put).
    */
   move(dir) {
     const steps = this.view?.steps ?? [];
@@ -394,7 +492,7 @@ export class Walkthrough {
     if (dir > 0 && here) this.setRead({ hunkIds: here.found.map((f) => f.hunk.id) }, true);
     let i = this.step + dir;
     if (this.unreadOnly) while (i >= 0 && i < steps.length && isRead(steps[i], this.read)) i += dir;
-    if (i >= 0) this.go(i);
+    if (i >= this.firstPage()) this.go(i);
   }
 
   /** Marks a step's hunks (or any `{ hunkIds }`) read or unread, to be written on the next tick. */
@@ -449,8 +547,52 @@ export class Walkthrough {
     this.pr = kept ?? this.prs.find((p) => p.current) ?? null;
   }
 
+  /** The task picker: found or off applies at once; your own opens the editor, filled with what is there now. */
+  chooseTask(mode, cx) {
+    const sk = this.diff?.sk ?? (this.source() ? sourceKey(this.source()) : null);
+    if (!this.repo || !sk) return;
+    if (mode === "own") {
+      const choice = this.taskChoiceFor(sk);
+      this.taskText.set_value(choice.text || this.task?.text || "");
+      this.editingTask = true;
+      this.taskText.focus();
+      cx.notify();
+      return;
+    }
+    this.editingTask = false;
+    this.saveTaskChoice(sk, { mode, text: this.taskChoiceFor(sk).text });
+    this.loading = true;
+    cx.spawn(async (cx) => this.reload(cx));
+  }
+
+  /** The editor's text becomes the task; an empty one goes back to the task found. */
+  saveTaskText(cx) {
+    const sk = this.diff?.sk;
+    if (!this.repo || !sk) return;
+    const text = this.taskText.value().trim().slice(0, MAX_TASK_CHARS);
+    this.saveTaskChoice(sk, text ? { mode: "own", text } : { mode: "auto", text: "" });
+    this.closeTaskEditor();
+    this.loading = true;
+    cx.spawn(async (cx) => this.reload(cx));
+  }
+
+  closeTaskEditor() {
+    this.editingTask = false;
+    this.typing = false;
+    this.handle.focus();
+  }
+
+  /** The task picker's face. */
+  taskFace() {
+    const mode = this.taskChoiceFor(this.diff?.sk).mode;
+    if (mode === "off") return "Task: off";
+    if (!this.task) return "Task: none";
+    return `Task: ${this.task.short}`;
+  }
+
   choose(kind, value, cx) {
     this.picking = null;
+    if (kind === "task") { this.chooseTask(value, cx); return; }
     if (kind === "auto") { this.auto = value; savePrefs({ autoGenerate: value }); cx.notify(); return; }
     if (kind !== "agent") { this.genError = null; this.loading = true; }
     if (kind === "model") { this.model = value; savePrefs({ model: value }); }
@@ -522,16 +664,21 @@ export class Walkthrough {
     cx.notify();
   }
 
-  /** The walkthrough shown, as Markdown; null when there is none. */
-  markdown() {
+  /**
+   * The walkthrough shown, as Markdown; null when there is none. Posted to a
+   * pull request, its task is left out unless it was that pull request's own
+   * description: a prompt to an agent or the reader's own words stay theirs.
+   */
+  markdown({ forPost = false } = {}) {
     const e = this.shown?.entry;
     if (!e || !this.view) return null;
-    return toMarkdown(this.view, e.walkthrough, { what: this.diff?.what, model: modelOf(e.model).name, language: languageOf(e.language).name, cost: e.cost });
+    const task = this.taskView && (!forPost || e.task?.from === "pr") ? this.taskView : null;
+    return toMarkdown(this.view, e.walkthrough, { what: this.diff?.what, model: modelOf(e.model).name, language: languageOf(e.language).name, cost: e.cost }, task, e.task?.label ?? "");
   }
 
   /** The walkthrough as a comment on the pull request it is of. Asked first: everyone on the pull request sees it. */
   async post(cx) {
-    const text = this.markdown(), pr = this.pr;
+    const text = this.markdown({ forPost: true }), pr = this.pr;
     if (!text || !pr || this.scope !== "pr" || this.posting) return;
     this.posting = true;
     cx.notify();
@@ -547,11 +694,16 @@ export class Walkthrough {
   }
 
   onKey(e, cx) {
-    if (this.typing) return;
+    // While typing, keys are the text's; only Esc in the task editor leaves it (a comment box keeps its own).
+    if (this.typing) {
+      if (e.key === "escape" && this.typing === "task" && this.editingTask) { this.closeTaskEditor(); cx.notify(); }
+      return;
+    }
     const k = e.key;
     if (this.picking && this.menuKey(k, cx)) { cx.notify(); return; }
     if (k === "escape") {
       if (this.picking) this.picking = null;
+      else if (this.editingTask) this.closeTaskEditor();
       else if (this.target) this.target = null;
       else if (this.confirmPost && !this.posting) this.confirmPost = false;
       else if (props()?.overlay) closeOverlay(props().overlay);
@@ -559,6 +711,7 @@ export class Walkthrough {
     else if (this.view && (k === "left" || k === "k" || k === "p")) this.move(-1);
     else if (this.view && k === "x") this.toggleRead();
     else if (this.view && k === "u") this.unreadOnly = !this.unreadOnly;
+    else if (this.taskView && k === "t") this.go(-1);
     else return;
     cx.notify();
   }
@@ -573,6 +726,7 @@ export class Walkthrough {
       .size_full().bg(inDialog ? t.popover : t.background).text_color(t.foreground).text_size(13)
       .child(this.header(t, inDialog))
       .child(this.toolbar(t))
+      .when(this.editingTask, (el) => el.child(this.taskEditor(t)))
       .child(div().flex_1().min_h(0).relative()
         .child(this.body(t))
         .when(Boolean(this.picking), (el) => el
@@ -617,6 +771,8 @@ export class Walkthrough {
         .child(picker(t, "pick-auto", `Auto: ${autoOf(this.auto).name.toLowerCase()}`, open("auto"), { tooltip: "Write the last turn's walkthrough without a click" })))
       .child(div().flex_1())
       .when(this.loading, (el) => el.child(div().text_size(11).text_color(t.dim).frames(["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"], 90)))
+      .when(Boolean(this.diff), (el) => el.child(picker(t, "pick-task", this.taskFace(), open("task"),
+        { tooltip: this.task ? `Matched against ${this.task.label.charAt(0).toLowerCase()}${this.task.label.slice(1)}` : "What the change is matched against" })))
       .child(picker(t, "pick-model", modelOf(this.model).name, open("model"), { tooltip: "Model" }))
       .child(picker(t, "pick-language", languageOf(this.language).name, open("language"), { tooltip: "Language of the explanations" }))
       .child(action);
@@ -635,6 +791,15 @@ export class Walkthrough {
         label: `#${p.number}  ${p.title}`, hint: `${p.author} · ${p.head} → ${p.base}${p.draft ? " · draft" : ""}${p.current ? " · this branch" : ""}`, value: p, selected: p.number === this.pr?.number })) };
       case "turn": return { side: "left", width: 480, items: turnItems(this) };
       case "auto": return { side: "left", width: 340, items: AUTO.map((a) => ({ label: a.name, hint: a.about, value: a.key, selected: a.key === this.auto })) };
+      case "task": {
+        const choice = this.taskChoiceFor(this.diff?.sk);
+        const hint = (m) => {
+          if (m.key === "auto" && choice.mode === "auto") return this.task ? this.task.label : "Nothing found for this change";
+          if (m.key === "own" && choice.text) return firstLine(choice.text, 60);
+          return m.about;
+        };
+        return { side: "right", width: 360, items: TASK_MODES.map((m) => ({ label: m.key === "own" ? "Your own…" : m.name, hint: hint(m), value: m.key, selected: m.key === choice.mode })) };
+      }
       case "model": return { side: "right", width: 280, items: MODELS.map((m) => ({ label: m.name, hint: m.about, value: m.key, selected: m.key === this.model })) };
       case "language": return { side: "right", width: 220, items: LANGUAGES.map((l) => ({ label: l.name, right: l.english === l.name ? "" : l.english, value: l.tag, selected: l.tag === this.language })) };
       case "agent": {
@@ -701,7 +866,64 @@ export class Walkthrough {
       .when((this.width ?? 1000) >= 720, (e) => e.child(this.contents(t)))
       .child(v_flex().flex_1().min_w(0).h_full()
         .children(this.banners(t))
-        .child(this.step < this.view.steps.length ? this.page(t, this.view.steps[this.step]) : this.tail(t)));
+        .child(this.step < 0 ? this.taskPage(t) : this.step < this.view.steps.length ? this.page(t, this.view.steps[this.step]) : this.tail(t)));
+  }
+
+  /** The reader's own task, written under the toolbar. */
+  taskEditor(t) {
+    const length = this.taskText.value().length;
+    return v_flex().id("task-editor").flex_none().px(14).py(10).gap(8).border_b(1).border_color(t.border).bg(t.raised)
+      .child(div().text_size(12).text_color(t.muted).child("What should this change do? Each request in it is matched to the steps that carry it out. It stays on this computer, and is left out of what is posted to a pull request."))
+      .child(div().w_full().on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Textarea.new(this.taskText).w_full()))
+      .child(h_flex().gap(8).items_center()
+        .child(button(t, "task-save", "Use this task", (_e, cx) => this.saveTaskText(cx), { kind: "solid", small: true, disabled: length > MAX_TASK_CHARS }))
+        .child(button(t, "task-cancel", "Cancel", (_e, cx) => { this.closeTaskEditor(); cx.notify(); }, { kind: "ghost", small: true }))
+        .child(div().flex_1())
+        .child(div().text_size(11).text_color(length > MAX_TASK_CHARS ? t.ansi1 : t.dim).child(`${length.toLocaleString("en")} / ${MAX_TASK_CHARS.toLocaleString("en")}`)));
+  }
+
+  /**
+   * The task's page: each request, where in the walkthrough it is carried out
+   * or that this diff doesn't show it, then the steps no request points at.
+   */
+  taskPage(t) {
+    const tv = this.taskView, e = this.shown.entry, task = e.task;
+    const toStep = (s, id) => div().id(id).flex_none().px(7).h(20).flex().items_center().rounded(5).border_1().border_color(t.border).bg(t.raised)
+      .text_size(11.5).cursor_pointer().hover((st) => st.bg(t.hover)).tooltip(s.title)
+      .on_click((_e, cx) => { this.go(s.position - 1); cx.notify(); })
+      .child(`${s.position}. ${clip(s.title, 42)}`);
+    const color = (c) => (c === "seen" ? t.ansi2 : c === "partly" ? t.ansi3 : t.dim);
+    const row = (a) => h_flex().w_full().max_w(820).gap(10).items_start().py(6).border_b(1).border_color(t.border)
+      .child(div().flex_none().w(16).pt(1).text_size(13).text_color(color(a.coverage)).tooltip(COVERAGE_ABOUT[a.coverage]).child(COVERAGE_MARK[a.coverage]))
+      .child(v_flex().flex_1().min_w(0).gap(5)
+        .child(div().text_size(13.5).line_height(1.5).when(a.coverage === "absent", (el) => el.text_color(t.muted)).child(a.text))
+        .child(h_flex().gap(6).flex_wrap().items_center()
+          .when(a.coverage === "partly", (el) => el.child(chip(t, "Partly", t.ansi3)))
+          .when(a.coverage === "absent", (el) => el.child(div().text_size(11.5).text_color(t.dim).child("Not in this diff")))
+          .children(a.steps.map((s) => toStep(s, `task-${a.id}-${s.id}`)))
+          .when(a.tail > 0, (el) => el.child(div().id(`task-${a.id}-tail`).text_size(11.5).text_color(t.dim).cursor_pointer().hover((st) => st.text_color(t.foreground))
+            .on_click((_e, cx) => { this.go(this.view.steps.length); cx.notify(); })
+            .child(a.steps.length ? `and ${a.tail} hunk${a.tail === 1 ? "" : "s"} under Not covered` : `${a.tail} hunk${a.tail === 1 ? "" : "s"} under Not covered`)))
+          .when(a.outdated, (el) => el.child(chip(t, "Outdated", t.blocked, t.blocked + "14").tooltip("Code this request was tied to has changed or is gone")))));
+    const text = task?.text ?? "";
+    return v_flex().id(`task-${e.generatedAt}`).flex_1().min_h(0).overflow_y_scrollbar().px(22).py(16).gap(10)
+      .child(h_flex().gap(8).items_center()
+        .child(div().flex_1().min_w(0).truncate().text_size(10.5).font_semibold().text_color(t.dim).child(`TASK${task?.label ? `  ·  ${task.label.toUpperCase()}` : ""}`))
+        .when(Boolean(text), (el) => el.child(button(t, "task-text", this.showTaskText ? "Hide the task" : "Show the task", (_e, cx) => { this.showTaskText = !this.showTaskText; cx.notify(); }, { kind: "ghost", small: true }))))
+      .child(div().text_size(17).font_semibold().child("What the task asks for"))
+      .child(div().max_w(820).text_size(12.5).line_height(1.5).text_color(t.muted).child("Each request in the task, and the steps that carry it out. It says where a request shows up in this diff, not whether it is done well; a request not in this diff may be done elsewhere."))
+      // A walkthrough of the prompts stays shown as more are sent; it says so rather than going stale.
+      .when(task?.from === "prompts" && this.task?.from === "prompts" && taskKey(task) !== taskKey(this.task), (el) => el.child(
+        div().max_w(820).text_size(12).text_color(t.dim).child(`Matched against the prompts as they were when it was written; ${this.task.label.replace(/ since .*$/, "")} now. Regenerate to match against them too.`)))
+      .when(this.showTaskText && Boolean(text), (el) => el.child(v_flex().w_full().max_w(820).p(10).gap(2).rounded(8).border_1().border_color(t.border).bg(t.raised).text_size(12).text_color(t.muted)
+        .children(text.split("\n").slice(0, 200).map((l) => div().child(l || " ")))
+        .when(Boolean(task?.context), (c) => c.child(div().pt(8).text_size(11).text_color(t.dim).child("Earlier prompts of the same session were given to make it clear.")))))
+      .when(!tv.asks.length, (el) => el.child(this.notice(t, t.muted, "The task names nothing concrete to match against the change: no request in it would show up as a change to files.")))
+      .when(tv.asks.length > 0, (el) => el.child(v_flex().w_full().children(tv.asks.map(row))))
+      .when(tv.outside.length > 0, (el) => el
+        .child(div().pt(10).text_size(14).font_semibold().child("Not tied to any request"))
+        .child(div().max_w(820).text_size(12.5).text_color(t.muted).child("Steps no request in the task points at: supporting work the model didn't tie to one, or work the task doesn't mention."))
+        .child(h_flex().gap(6).flex_wrap().children(tv.outside.map((s) => toStep(s, `task-out-${s.id}`)))));
   }
 
   /** Before the first walkthrough: what would be read, and what it would cost. */
@@ -720,7 +942,8 @@ export class Walkthrough {
           .child(chip(t, `${d.hunkCount} hunk${d.hunkCount === 1 ? "" : "s"}`))
           .child(chip(t, `≈ ${formatTokens(tokens)} tokens`, tooBig ? t.ansi1 : undefined))
           .when(d.generatedPaths.length > 0, (e) => e.child(chip(t, `${d.generatedPaths.length} generated, not sent`)))
-          .when(d.unread.length > 0, (e) => e.child(chip(t, `${d.unread.length} not read`))))
+          .when(d.unread.length > 0, (e) => e.child(chip(t, `${d.unread.length} not read`)))
+          .when(Boolean(this.task), (e) => e.child(chip(t, `Task: ${this.task.short}`, t.accent).tooltip(`${this.task.label}: each request in it is matched to the steps that carry it out. The task menu changes or turns it off.`))))
         .when(this.claude === null, (e) => e.child(this.notice(t, t.ansi1, "Claude Code's `claude` isn't installed, or isn't on the PATH Herdr starts programs with. Walkthroughs are written by `claude -p`.")))
         .when(tooBig, (e) => e.child(this.notice(t, t.ansi1, "This diff is too large to send whole, and a walkthrough of part of it would read as complete. Pick a narrower scope.")))
         .when(d.hunkCount === 0 && d.files.length > 0, (e) => e.child(this.notice(t, t.muted, d.generatedPaths.length ? "Only generated files changed; they aren't sent to the model." : "No changed lines to read: binary files, renames or mode changes only.")))
@@ -785,8 +1008,14 @@ export class Walkthrough {
         out.push(bar("b-other", t.border, `Showing the ${languageOf(e.language).name} walkthrough by ${modelOf(e.model).name}. There's none in ${languageOf(this.language).name} by ${modelOf(this.model).name} for this code yet.`, regen("Generate")));
       } else {
         const n = this.view.outdated, fresh = this.view.uncovered.reduce((s, u) => s + u.hunks.length, 0);
-        // Same code, other key: it was written under other preferences, or by an older version of this mod.
-        if (e.code && e.code === codeKey(this.diff.files)) out.push(bar("b-prefs", t.border, "This code hasn't changed, but your preferences or this mod's prompt have since this walkthrough was written.", regen("Regenerate")));
+        // Same code, other key: it was written for another task, under other preferences, or by an older version of this mod.
+        // Prompts to agents count as one kind of task: a walkthrough of them stays exact as more are sent.
+        const taskChanged = taskCacheKey(e.task) !== taskCacheKey(this.task);
+        const why = !taskChanged ? "This code hasn't changed, but your preferences or this mod's prompt have since this walkthrough was written."
+          : !e.task ? "This walkthrough was written without a task. Regenerate to match the change against it."
+          : !this.task ? "This walkthrough was matched against a task that is now off or gone."
+          : "The task has changed since this walkthrough was matched against it.";
+        if (e.code && e.code === codeKey(this.diff.files)) out.push(bar("b-prefs", t.border, why, regen("Regenerate")));
         else out.push(bar("b-stale", t.blocked, n
           ? `Written for an earlier state of this code: ${n === 1 ? "1 step describes" : `${n} steps describe`} code that has changed or is gone.`
           : `The code changed after this walkthrough was written. ${fresh} hunk${fresh === 1 ? " is" : "s are"} listed under Not covered.`, regen("Regenerate")));
@@ -822,6 +1051,18 @@ export class Walkthrough {
       .when(Boolean(w.summary), (e) => e.child(div().px(8).pt(4).pb(6).text_size(12).line_height(1.5).text_color(t.muted).child(w.summary)))
       .when(this.unreadOnly, (e) => e.child(h_flex().px(8).pt(8).gap(6).items_center().text_size(11).text_color(t.accent)
         .child(div().child("Unread only")).child(div().text_color(t.dim).child("· u shows all"))))
+      .when(Boolean(this.taskView), (e) => {
+        const tv = this.taskView;
+        return e.child(h_flex().id("toc-task").mt(8).w_full().pl(6).pr(8).py(5).gap(8).items_center().rounded(6).cursor_pointer()
+          .border_l(2).border_color(this.step === -1 ? t.accent : "#00000000")
+          .when(this.step === -1, (el) => el.bg(t.accent + "1f"))
+          .when(this.step !== -1, (el) => el.hover((st) => st.bg(t.hover)))
+          .on_click((_e, cx) => { this.go(-1); cx.notify(); })
+          .tooltip(tv.total ? `${tv.met} of ${tv.total} request${tv.total === 1 ? "" : "s"} show up in this diff (t)` : "The task names nothing concrete (t)")
+          .child(div().flex_none().size(18).rounded(5).flex().items_center().justify_center().bg(t.raised).text_size(10).text_color(t.accent).child("◎"))
+          .child(div().flex_1().text_size(12.5).child("Task"))
+          .child(div().text_size(11).text_color(tv.met < tv.total ? t.ansi3 : t.dim).child(tv.total ? `${tv.met} / ${tv.total}` : "—")));
+      })
       .children(parts.flatMap(({ part, steps }) => [
         div().px(8).pt(12).pb(3).text_size(10).font_semibold().text_color(t.dim).child(part.title.toUpperCase()),
         ...steps.map((s) => stepRow(s, s.position - 1)),
@@ -864,6 +1105,13 @@ export class Walkthrough {
         .when(s.weight === "key", (e) => e.child(chip(t, "Key change", t.accent, t.accent + "14").tooltip("The rest of the change depends on this, or its main behavior lives here. Read it closely.")))
         .when(s.weight === "skim", (e) => e.child(chip(t, "Context", null, t.raised).tooltip("A supporting change, here so the rest makes sense. Safe to skim.")))
         .when(s.outdated, (e) => e.child(chip(t, "Outdated", t.blocked, t.blocked + "14").tooltip("Code this step described has changed or is gone."))))
+      .when(Boolean(this.taskView?.total), (e) => {
+        const asks = asksOf(this.taskView, s);
+        const toTask = (id, el) => div().id(id).cursor_pointer().on_click((_e, cx) => { this.go(-1); cx.notify(); }).child(el);
+        return e.child(h_flex().gap(6).flex_wrap().items_center().children(asks.length
+          ? asks.map((a) => toTask(`for-${s.id}-${a.id}`, chip(t, `For: ${clip(a.text, 64)}`, t.ansi2, t.ansi2 + "12").tooltip(a.text)))
+          : [toTask(`for-${s.id}-none`, chip(t, "Not tied to a request", null, t.raised).tooltip("No request in the task points at this step: supporting work, or work the task doesn't mention."))]));
+      })
       .child(div().max_w(820).text_size(13.5).line_height(1.6).child(s.text))
       .when(s.notes.length > 0, (e) => e.child(v_flex().w_full().max_w(820).gap(6).children(s.notes.map((n) =>
         h_flex().w_full().gap(8).items_start().child(chip(t, NOTE_LABEL[n.kind], t.blocked, t.blocked + "12").tooltip(NOTE_ABOUT[n.kind])).child(div().flex_1().min_w(0).pt(1).text_size(12.5).line_height(1.5).text_color(t.muted).child(n.text))))))
@@ -992,8 +1240,8 @@ export class Walkthrough {
     const agent = this.agent();
     const n = this.ownComments().length;
     return h_flex().h(44).flex_none().px(14).gap(8).items_center().border_t(1).border_color(t.border)
-      .child(button(t, "prev", "← Previous", (_e, cx) => { this.move(-1); cx.notify(); }, { small: true, disabled: this.step === 0 }))
-      .child(button(t, "next", this.step === steps - 1 ? "Not covered →" : "Next →", (_e, cx) => { this.move(1); cx.notify(); }, { small: true, disabled: this.step >= steps }))
+      .child(button(t, "prev", this.step === 0 && this.taskView ? "← Task" : "← Previous", (_e, cx) => { this.move(-1); cx.notify(); }, { small: true, disabled: this.step <= this.firstPage() }))
+      .child(button(t, "next", this.step < 0 ? "First step →" : this.step === steps - 1 ? "Not covered →" : "Next →", (_e, cx) => { this.move(1); cx.notify(); }, { small: true, disabled: this.step >= steps }))
       .child(div().text_size(11.5).text_color(t.dim).child(this.step < steps ? `${read} / ${steps} read · ← → to move` : `End of the walkthrough · ${read} / ${steps} read`))
       .child(button(t, "unread-only", this.unreadOnly ? "Show all" : "Unread only", (_e, cx) => { this.unreadOnly = !this.unreadOnly; cx.notify(); },
         { kind: "ghost", small: true, tooltip: this.unreadOnly ? "List every step again (u)" : "List and step through only the steps not read yet (u)" }))

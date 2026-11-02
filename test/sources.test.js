@@ -231,7 +231,7 @@ test("open pull requests, newest update first, the current branch's marked", asy
   ];
   const { exec, calls } = fakeGh({ "pr list": JSON.stringify(list) });
   const prs = await pullRequests(exec, "/repo", "feature");
-  assert.match(calls[0], /^gh pr list --state open --limit 50 --json number,title,headRefName,baseRefName,author,isDraft,updatedAt$/);
+  assert.match(calls[0], /^gh pr list --state open --limit 50 --json number,title,body,headRefName,baseRefName,author,isDraft,updatedAt$/);
   assert.deepEqual(prs.map((p) => [p.number, p.author, p.draft, p.current]), [[2, "y", true, true], [1, "x", false, false]]);
   await assert.rejects(pullRequests(fakeGh({ "pr list": "not json" }).exec, "/repo"), /something other than a list/);
 });

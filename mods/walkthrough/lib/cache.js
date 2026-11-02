@@ -17,8 +17,9 @@ import { VERSION, PROMPT_VERSION } from "./walkthrough.js";
 export const codeKey = (files) => longHash(JSON.stringify(
   files.filter((f) => !f.generated && !f.unread).map((f) => [f.path, f.status, f.hunks.map((h) => h.id)])));
 
-export function cacheKey({ top, source, model, language, preferences = "", files }) {
-  return longHash(JSON.stringify([VERSION, PROMPT_VERSION, top, source, model, language, hash(String(preferences).trim()), codeKey(files)]));
+/** `task`: lib/task.js taskKey, "" for none, so a walkthrough without a task keeps the key it always had. */
+export function cacheKey({ top, source, model, language, preferences = "", files, task = "" }) {
+  return longHash(JSON.stringify([VERSION, PROMPT_VERSION, top, source, model, language, hash(String(preferences).trim()), codeKey(files), ...(task ? [task] : [])]));
 }
 
 /** One pointer (the walkthrough shown last) and one running job per repository and source. */

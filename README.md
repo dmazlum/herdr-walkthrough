@@ -43,6 +43,15 @@ a Codex agent, or any other.
   snapshot of the working tree when you send a prompt and when the agent stops (see
   [Last turn](#last-turn)). Pick any of the last 20 turns by their prompt; the prompt is
   handed to the model too, so the steps are explained against what was asked.
+- **Matched against the task.** A walkthrough is matched against what the change was
+  for, and opens on it: each request in the task, ✓ shown in this diff, ◐ partly, ○ not in
+  this diff, with links to the steps that carry it out, then the steps no request points at.
+  Each step says which request it serves. The task is found for you: a Last turn's prompt
+  (with its session's earlier prompts, so "yes, the second one" reads), a pull request's
+  description, a commit's message (a merge's: the pull request's title), or for local
+  changes and branches the prompts you sent to Claude Code in this repository since the
+  last commit or since the branch left its base. Or write your own, or turn it off, from
+  the **Task** menu. It says where a request shows up, never whether it is done well.
 - **Written while you wait.** With **Auto: while open** (the default), opening the
   walkthrough writes the last finished turn's walkthrough if it has none (not one whose
 end the walkthrough had to guess; see [Last turn](#last-turn)), and a
@@ -67,9 +76,13 @@ end the walkthrough had to guess; see [Last turn](#last-turn)), and a
   you come back.
 - **Comments to your agent.** Click any line to comment on it, then **Send** pastes all
   comments, with the line and its code, into an agent in the same space.
-- **Copy as Markdown.** The steps, their order, weights and notes, and what no step covers,
-  on the clipboard: paste it into a pull request's description, a review or a chat. The
-  code stays out; wherever you paste it, the diff is already beside it.
+- **Copy as Markdown.** The task's requests, the steps, their order, weights and notes, and
+  what no step covers, on the clipboard: paste it into a pull request's description, a
+  review or a chat. The code stays out; wherever you paste it, the diff is already beside
+  it. It sits between `<!-- walkthrough -->` marks (GitHub hides them), so a pull request
+  description holding one isn't read back as the task. Posted to a pull request, the task
+  is left out unless it was that pull request's own description: your prompts and your own
+  words aren't published.
 
 ## Install
 
@@ -91,9 +104,11 @@ Then merge [`keys.json`](keys.json) into `~/.config/herdr-app/keys.json`:
 | `←` `→` (or `j` `k`) | Previous / next step; moving on marks the step read |
 | `x` | Mark the step read or unread |
 | `u` | Unread only: list and step through only the steps not read yet |
-| Esc | Close a picker, a comment, then the dialog |
+| `t` | The task's page (`←` from the first step goes there too) |
+| **Task** menu | Found (default), Your own… (write it), or Off; kept per repository and scope |
+| Esc | Close a picker, the task editor, a comment, then the dialog |
 | Last turn → **Auto** | While open (default): write the last turn's walkthrough without a click; Off: only on Generate |
-| `walkthrough.generate`, `.cancel`, `.next`, `.prev`, `.copy`, `.unread` | The same, Copy as Markdown and Unread only, for your own keys |
+| `walkthrough.generate`, `.cancel`, `.next`, `.prev`, `.copy`, `.unread`, `.task` | The same, Copy as Markdown, Unread only and writing your own task, for your own keys |
 
 To keep it beside an agent instead of over it, open it as a pane:
 
@@ -169,8 +184,20 @@ herdr-app check ~/.config/herdr-app/mods/walkthrough
 
 Nothing is generated until you press **Generate**, except an agent's last turn while
 **Auto** is on (with Haiku, up to 300 hunks; see [Last turn](#last-turn)). Opening the walkthrough only reads git
-(and, on the Pull request tab, asks `gh` for the open pull requests and the picked one's diff).
-Nothing is posted until you press **Post** and confirm.
+(and, on the Pull request tab, asks `gh` for the open pull requests, with their
+descriptions, and the picked one's diff). For local changes and branches it also reads
+Claude Code's transcripts of this repository (`~/.claude/projects/`, or
+`$CLAUDE_CONFIG_DIR`), only for what you typed since the last commit or since the branch
+left its base; tool output, subagents and commands are left out. Nothing is posted until
+you press **Post** and confirm.
+
+The task goes to the same `claude -p` call as the diff, between tags the model is told to
+read as material, never as instructions, and at most 6,000 characters of it. A
+walkthrough without a task is asked for exactly as before, and keeps its cache. One
+written before this version for a source that now finds a task (a commit with a message,
+a pull request, a turn) is still shown, with a banner offering Regenerate; Auto doesn't
+write it again unasked. A walkthrough matched against your prompts stays as it is while
+you keep prompting: its task page says when more were sent since.
 
 A generation is one `claude -p` call, in the background, with no tools, no MCP servers, no
 settings, hooks or skills: the model reads the diff and answers in JSON. Without those
@@ -181,7 +208,7 @@ Everything is kept in `~/.herdr/walkthrough/`:
 
 | Path | What |
 | --- | --- |
-| `entries/<key>.json` | Finished walkthroughs, the newest 200 |
+| `entries/<key>.json` | Finished walkthroughs, the newest 200, each with the task it was matched against |
 | `pointers/<place>.json` | The one shown last per repository and scope |
 | `jobs/<place>/` | A generation in progress: its prompt, `run.sh`, and the answer |
 | `turns/<repo>/<turn>/` | The last 20 turns per repository, written by `hooks/turn.sh`: the hook's input, the snapshots' trees, the objects they needed |
@@ -205,6 +232,11 @@ walkthrough of half a diff reads exactly as confidently as one of the whole.
   remote. GitHub sends no diff past about 300 files or 20,000 lines; read such a change as a
   Branch. A pull request is read again when you pick its tab or it, not while it is open.
 - A page draws at most 2,500 lines of code; the rest is counted.
+- The task is read from Claude Code only: prompts sent to Codex or another agent aren't
+  found (write them as your own task). For local changes it is every prompt typed in this
+  repository since the last commit, whichever agent and session it went to; a commit made
+  mid-task starts it over. Matching is the model's reading: a request marked "not in this
+  diff" may be done in a file the diff doesn't hold, or under another name.
 - Comments are kept while the walkthrough is open, and sent with Enter.
 - Last turn records Claude Code's turns only (other agents have no such hooks yet), and
   writes walkthroughs without a click only while the walkthrough is open.
@@ -226,7 +258,7 @@ walkthrough of half a diff reads exactly as confidently as one of the whole.
 ## Development
 
 ```sh
-npm test    # parsing, hunk ids, digest, prompt, normalizing, staleness, read tracking, Markdown export, syntax colours, gh (faked), turns, and git and turn.sh against real repos
+npm test    # parsing, hunk ids, digest, prompt, normalizing, staleness, read tracking, tasks and transcripts, Markdown export, syntax colours, gh (faked), turns, and git and turn.sh against real repos
 ```
 
 The UI is checked in Herdr: `herdr-app check`, then `herdr-app shot` while it is open.
