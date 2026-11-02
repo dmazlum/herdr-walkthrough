@@ -196,7 +196,7 @@ export function hookHelp(v, t) {
             })),
           h_flex().gap(10).items_center()
             .child(button(t, "copy-hooks", "Copy settings", (_e, cx) => cx.spawn(async (cx) => {
-              try { await copyText(snippet); v.sent = "✓ Copied"; } catch (e) { v.sent = `Couldn't copy: ${String(e?.message ?? e)}`; }
+              try { await copyText(snippet); v.flash("✓ Copied"); } catch (e) { v.flash(`Couldn't copy: ${String(e?.message ?? e)}`); }
               cx.notify();
             }), { kind: "solid", small: true }))
             .when(Boolean(v.sent), (e) => e.child(div().text_size(11.5).text_color(v.sent.startsWith("✓") ? t.ansi2 : t.dim).child(v.sent)))))

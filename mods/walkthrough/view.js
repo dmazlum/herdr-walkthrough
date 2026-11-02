@@ -302,7 +302,8 @@ export class Walkthrough {
         this.shown = shown;
         // A job this view started or ended while reading is newer than what the read found.
         if (jobSeq === this.jobSeq && !this.starting) this.job = job;
-        this.view = shown ? overlay(shown.entry.walkthrough, diff.files) : null;
+        // With nothing changed there is nothing to walk through: the last walkthrough shown here isn't offered (nor its footer, nor Copy).
+        this.view = shown && diff.files.length ? overlay(shown.entry.walkthrough, diff.files) : null;
         this.taskView = this.view ? overlayAsks(shown.entry.walkthrough.asks, this.view) : null;
         // Another walkthrough is another reading path: it opens on its first step not yet read,
         // or on its task while none of it is read.
@@ -350,6 +351,8 @@ export class Walkthrough {
   }
 
   async tick(cx) {
+    // A note on what Copy, Send or Post did fades: soon when it worked, later when it didn't.
+    if (this.sent && Date.now() - this.sentAt >= (/^(✓ )?(Sent|Copied|Posted)\b/.test(this.sent) ? 1000 : 10_000)) { this.sent = null; cx.notify(); }
     if (this.ticking || !this.repo) return;
     this.ticking = true;
     try {
@@ -646,10 +649,10 @@ export class Walkthrough {
     const mixed = new Set(this.diff?.files.map((f) => f.scope)).size > 1;
     const r = await hc(["send", agent.address, formatComments(mine, this.diff?.what ?? "a change", { mixed })]).catch((e) => ({ code: 1, stderr: String(e?.message ?? e) }));
     if (r.code === 0) {
-      this.sent = `Sent ${mine.length} comment${mine.length === 1 ? "" : "s"} to ${agent.program?.name ?? agent.address}.`;
+      this.flash(`Sent ${mine.length} comment${mine.length === 1 ? "" : "s"} to ${agent.program?.name ?? agent.address}.`);
       this.comments = this.comments.filter((c) => !mine.includes(c));
     } else {
-      this.sent = `Couldn't send: ${(r.stderr || r.stdout || "hc send failed").trim()}`;
+      this.flash(`Couldn't send: ${(r.stderr || r.stdout || "hc send failed").trim()}`);
     }
     cx.notify();
   }
@@ -660,11 +663,17 @@ export class Walkthrough {
     if (!text) return;
     try {
       await copyText(text);
-      this.sent = "Copied the walkthrough as Markdown.";
+      this.flash("Copied the walkthrough as Markdown.");
     } catch (err) {
-      this.sent = `Couldn't copy: ${String(err?.message ?? err)}`;
+      this.flash(`Couldn't copy: ${String(err?.message ?? err)}`);
     }
     cx.notify();
+  }
+
+  /** Shows a note in the footer until tick clears it. */
+  flash(text) {
+    this.sent = text;
+    this.sentAt = Date.now();
   }
 
   /**
@@ -674,7 +683,7 @@ export class Walkthrough {
    */
   markdown({ forPost = false } = {}) {
     const e = this.shown?.entry;
-    if (!e || !this.view) return null;
+    if (!e || !this.view || !this.diff?.files.length) return null;
     const task = this.taskView && (!forPost || e.task?.from === "pr") ? this.taskView : null;
     return toMarkdown(this.view, e.walkthrough, { what: this.diff?.what, model: modelOf(e.model).name, language: languageOf(e.language).name, cost: e.cost }, task, e.task?.label ?? "");
   }
@@ -687,9 +696,9 @@ export class Walkthrough {
     cx.notify();
     try {
       await postComment(this.repo.top, pr.number, text);
-      this.sent = `Posted the walkthrough to #${pr.number}.`;
+      this.flash(`Posted the walkthrough to #${pr.number}.`);
     } catch (err) {
-      this.sent = `Couldn't post: ${String(err?.message ?? err)}`;
+      this.flash(`Couldn't post: ${String(err?.message ?? err)}`);
     }
     this.posting = false;
     this.confirmPost = false;
