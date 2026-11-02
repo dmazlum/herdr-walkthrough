@@ -5,7 +5,7 @@
 import { div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { agents, notify, settings, watchFolder } from "herdr";
-import { turnSource, pickTurn, lastFinished, isOpen, firstLine, ago, hookSettings } from "./lib/turns.js";
+import { turnSource, pickTurn, keepTurn, lastFinished, isOpen, autoWritable, firstLine, ago, hookSettings, HOOK_WAIT } from "./lib/turns.js";
 import { turnsFolder, listTurns, closeTurn, readDiff, readPreferences, keyFor, hasEntry, jobOf, preparePrompt, fits, startJob, finished, finishJob, copyText, hookScript } from "./engine.js";
 import { button, formatElapsed } from "./ui.js";
 
@@ -50,8 +50,7 @@ export async function loadTurns(v) {
   }
   const before = v.turn;
   v.turns = turns;
-  v.turn = (v.turnPinned && turns.find((t) => t.id === before?.id)) || pickTurn(turns, v.from);
-  if (!v.turn) v.turnPinned = false;
+  ({ turn: v.turn, pinned: v.turnPinned } = keepTurn(turns, before, v.turnPinned, v.from));
   return before?.id !== v.turn?.id || before?.state !== v.turn?.state || before?.endTree !== v.turn?.endTree;
 }
 
@@ -74,6 +73,7 @@ export const turnLabel = (v) => (v.turn ? firstLine(v.turn.prompt, 48) || "(empt
 function stateOf(t) {
   if (t.state === "running") return "still running";
   if (t.state === "stale") return "no end recorded";
+  if (t.frozen) return "no Stop recorded, ended when seen idle";
   if (t.state === "interrupted") return "interrupted";
   return t.ended ? `took ${formatElapsed(t.ended - t.started)}` : "finished";
 }
@@ -106,7 +106,7 @@ export async function turnTick(v, cx) {
       // The Stop hook writes the turn's end a moment after the agent reports it is done.
       const turn = lastFinished(v.turns, agents().filter((a) => a.tab === v.tab).map((a) => a.address));
       if (turn && turn.ended >= v.autoWanted - 60_000) { v.autoWanted = null; await autoGenerate(v, cx, turn); }
-      else if (Date.now() - v.autoWanted > 20_000) v.autoWanted = null;
+      else if (Date.now() - v.autoWanted > HOOK_WAIT) v.autoWanted = null;
     }
   }
   for (const b of [...v.background]) {
@@ -147,7 +147,7 @@ export function announce(source) {
  * AUTO_MAX_HUNKS, where Generate is waited for.
  */
 export async function autoGenerate(v, cx, turn) {
-  if (v.auto === "off" || !v.claude || !v.repo || !turn || isOpen(turn) || v.autoTried.has(turn.id)) return;
+  if (v.auto === "off" || !v.claude || !v.repo || !autoWritable(turn) || v.autoTried.has(turn.id)) return;
   v.autoTried.add(turn.id);
   try {
     const source = turnSource(turn);

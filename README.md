@@ -53,7 +53,8 @@ a Codex agent, or any other.
   last commit or since the branch left its base. Or write your own, or turn it off, from
   the **Task** menu. It says where a request shows up, never whether it is done well.
 - **Written while you wait.** With **Auto: while open** (the default), opening the
-  walkthrough writes the last finished turn's walkthrough if it has none, and a
+  walkthrough writes the last finished turn's walkthrough if it has none (not one whose
+end the walkthrough had to guess; see [Last turn](#last-turn)), and a
   walkthrough open as a pane writes one each time an agent in its tab finishes, then
   says so in a notification. Only with Haiku, and only up to 300 hunks; past that it waits
   for Generate. Already written means free: the cache answers.
@@ -148,8 +149,11 @@ agent up. In a 6,000-file repository a snapshot takes about a second.
 A turn stopped with Esc, or an agent quit mid-turn, gets no Stop hook from Claude Code.
 Such a turn ends at the next prompt of its session or its terminal (`/clear` starts a
 new session there). The newest one is read up to now while its agent works; once the
-agent has been quiet for two minutes (or, with no agent to ask, after 12 hours) its end
-is frozen at that moment, so it stops taking in later edits. New files over 1 MB a turn
+agent has been quiet for 45 seconds (or, with no agent to ask, after 12 hours) its end
+is frozen at that moment, so it stops taking in later edits. The walkthrough can only see
+that moment, not the one the agent stopped at: edits you made in between (or, with the
+walkthrough closed, any time before you open it) count as the turn's. Such a turn is
+listed as "no Stop recorded, ended when seen idle", and Auto leaves it to Generate. New files over 1 MB a turn
 made are listed under Not covered, as everywhere else. Inside
 Herdr each turn records its terminal (`HC_TERMINAL_ID`), so the tab shows the turn of the
 agent you opened it over, and a pane knows which turns are its tab's.

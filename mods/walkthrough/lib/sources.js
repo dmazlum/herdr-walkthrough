@@ -162,9 +162,9 @@ export async function snapshotTree(exec, top, { index, objects }) {
     if (r.code !== 0) throw new Error((r.stderr || `git ${args[0]} failed`).trim());
     return (r.stdout ?? "").trim();
   };
-  const snap = async () => {
+  const snap = async (copy) => {
     // The repository's own index, copied once: its file stats spare re-reading every unchanged file.
-    await exec("sh", ["-c", '[ -f "$1" ] || [ ! -f "$0" ] || cp -p "$0" "$1"', real, index]);
+    if (copy) await exec("sh", ["-c", '[ -f "$1" ] || [ ! -f "$0" ] || cp -p "$0" "$1"', real, index]);
     // A file small when the turn began is in this index already: out with it too, or its old content stays.
     if (big.length) await run(["update-index", "--force-remove", "--", ...big]);
     await run(["add", "-A", "--", ".", ...big.map((p) => `:(exclude,literal)${p}`)]);
@@ -172,10 +172,10 @@ export async function snapshotTree(exec, top, { index, objects }) {
   };
   await exec("mkdir", ["-p", objects]);
   let tree;
-  try { tree = await snap(); } catch {
-    // A copied index git can't use here (a split index, say) is dropped, and the snapshot starts over without it.
+  try { tree = await snap(true); } catch {
+    // A copied index git can't use here (a split index, say) is dropped, and the snapshot starts over without it, as turn.sh's does.
     await exec("rm", ["-f", index]);
-    tree = await snap().catch(async (e) => { await exec("rm", ["-f", index]); throw e; });
+    tree = await snap(false).catch(async (e) => { await exec("rm", ["-f", index]); throw e; });
   }
   return { tree, big };
 }
@@ -278,7 +278,7 @@ export async function loadSections(exec, top, source) {
       const r = await exec("env", [`GIT_ALTERNATE_OBJECT_DIRECTORIES=${objects}`, "git", ...READ, "diff", ...DIFF, source.startTree, end, ...(left.length ? ["--", ".", ...left] : [])], { cwd: top });
       const before = new Set(source.startBig ?? []);
       unread = big.filter((p) => !before.has(p)).map((path) => ({ path, why: "Not read: larger than 1 MB." }));
-      if (r.code !== 0) throw new Error(/bad object|not a tree|could not read/i.test(r.stderr ?? "") ? "This turn's snapshots are gone: only the newest 20 turns are kept." : (r.stderr || "git diff failed").trim());
+      if (r.code !== 0) throw new Error(await snapshotsGone(exec, top, source, r.stderr) ?? (r.stderr || "git diff failed").trim());
       add("turn", r.stdout ?? "");
       break;
     }
@@ -286,6 +286,20 @@ export async function loadSections(exec, top, source) {
       throw new Error(`Unknown source "${source.kind}"`);
   }
   return { sections, unread };
+}
+
+/**
+ * Why a turn's diff found something missing, or null when nothing was. A
+ * turn's folder goes when 20 newer ones are kept; the files its snapshots left
+ * to the repository's objects can go with `git gc`, once nothing there names them.
+ */
+async function snapshotsGone(exec, top, source, stderr) {
+  if (!/bad object|not a tree|could not read|unable to read/i.test(stderr ?? "")) return null;
+  const dirs = [...new Set([source.dir, source.endDir ?? source.dir])];
+  const r = await exec("sh", ["-c", 'for d; do [ -d "$d/objects" ] || exit 1; done', "sh", ...dirs], { cwd: top });
+  return r.code !== 0
+    ? "This turn's snapshots are gone: only the newest 20 turns are kept."
+    : "Part of this turn is gone from the repository: its snapshots point at file contents git keeps there, and git gc has removed some that no commit or index still names.";
 }
 
 /**
