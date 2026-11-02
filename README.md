@@ -54,6 +54,12 @@ a Codex agent, or any other.
   comment on the pull request, after you confirm.
 - **Model and language per walkthrough.** Haiku (default), Sonnet or Opus; explanations in
   fourteen languages, starting from your system's. Identifiers and paths stay as they are.
+- **What you've read, remembered.** Moving on from a step marks it read; `x` marks it read
+  or unread again. The ticks stay when you close the dialog, switch scope, stage the code or
+  regenerate: a hunk is read by its content, so only an edit makes it unread. `u` lists and
+  steps through only what is left. Open a walkthrough after the code moved and it says which
+  steps changed since you last read them; under Not covered, the hunks you haven't read stand
+  out.
 - **Paid once.** Walkthroughs are cached by the exact content of the diff, model and
   language. Put the code back the way it was and the earlier walkthrough is back, free.
 - **Runs in the background.** Close the dialog, or Herdr; the walkthrough is waiting when
@@ -81,10 +87,12 @@ Then merge [`keys.json`](keys.json) into `~/.config/herdr-app/keys.json`:
 | Key / command | What it does |
 | --- | --- |
 | `cmd-shift-k` → `mod.open:walkthrough` | Open the walkthrough of the focused terminal's repository |
-| `←` `→` (or `j` `k`) | Previous / next step |
+| `←` `→` (or `j` `k`) | Previous / next step; moving on marks the step read |
+| `x` | Mark the step read or unread |
+| `u` | Unread only: list and step through only the steps not read yet |
 | Esc | Close a picker, a comment, then the dialog |
 | Last turn → **Auto** | While open (default): write the last turn's walkthrough without a click; Off: only on Generate |
-| `walkthrough.generate`, `.cancel`, `.next`, `.prev`, `.copy` | The same, and Copy as Markdown, for your own keys |
+| `walkthrough.generate`, `.cancel`, `.next`, `.prev`, `.copy`, `.unread` | The same, Copy as Markdown and Unread only, for your own keys |
 
 To keep it beside an agent instead of over it, open it as a pane:
 
@@ -173,6 +181,7 @@ Everything is kept in `~/.herdr/walkthrough/`:
 | `pointers/<place>.json` | The one shown last per repository and scope |
 | `jobs/<place>/` | A generation in progress: its prompt, `run.sh`, and the answer |
 | `turns/<repo>/<turn>/` | The last 20 turns per repository, written by `hooks/turn.sh`: the hook's input, the snapshots' trees, the objects they needed |
+| `read/<repo>.json` | The hunks you've read in a repository, by content, the newest 5,000 |
 | `clipboard.md` | The last walkthrough copied as Markdown |
 | `pr-comment.md` | The last walkthrough posted to a pull request |
 | `preferences.md` | Optional: your own wishes for tone and emphasis, added to every prompt |
@@ -195,6 +204,11 @@ walkthrough of half a diff reads exactly as confidently as one of the whole.
 - Comments are kept while the walkthrough is open, and sent with Enter.
 - Last turn records Claude Code's turns only (other agents have no such hooks yet), and
   writes walkthroughs without a click only while the walkthrough is open.
+- What you read is written once a second; a mark made in the last second before Herdr quits
+  can be lost.
+- A step counts as changed since you read it when part of it was read, or when a hunk you
+  read in its file, in the walkthrough shown when this one was generated, is gone. Without
+  one shown before, an edited hunk looks like a new one: unread, not changed.
 
 ## Roadmap
 
@@ -208,7 +222,7 @@ walkthrough of half a diff reads exactly as confidently as one of the whole.
 ## Development
 
 ```sh
-npm test    # parsing, hunk ids, digest, prompt, normalizing, staleness, Markdown export, syntax colours, gh (faked), turns, and git and turn.sh against real repos
+npm test    # parsing, hunk ids, digest, prompt, normalizing, staleness, read tracking, Markdown export, syntax colours, gh (faked), turns, and git and turn.sh against real repos
 ```
 
 The UI is checked in Herdr: `herdr-app check`, then `herdr-app shot` while it is open.

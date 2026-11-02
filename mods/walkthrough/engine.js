@@ -5,6 +5,7 @@
 //   pointers/<place>.json  the one shown last for a repository and source
 //   jobs/<place>/          a generation in progress (run.sh, prompt, answer)
 //   turns/<repo>/<turn>/   an agent's turn, written by hooks/turn.sh (see lib/turns.js)
+//   read/<repo>.json       the hunks read in a repository, by content
 //   preferences.md         optional: the reader's own wishes, added to every prompt
 
 import { exec, home, appHome, readTextFile, writeTextFile } from "herdr";
@@ -13,6 +14,8 @@ import { buildDigest } from "./lib/digest.js";
 import { buildPrompt } from "./lib/prompt.js";
 import { SCHEMA, normalize, VERSION } from "./lib/walkthrough.js";
 import { cacheKey, codeKey, placeKey, deadline, MAX_PROMPT_CHARS } from "./lib/cache.js";
+import { longHash } from "./lib/hash.js";
+import { mergeRead } from "./lib/read.js";
 import { jobScript, readOutcome, isRunCommand } from "./lib/job.js";
 import { parseListing, resolveEnds, LISTING } from "./lib/turns.js";
 
@@ -21,6 +24,7 @@ export const dataDir = () => `${home()}/.herdr/walkthrough`;
 const entryPath = (key) => `${dataDir()}/entries/${key}.json`;
 const pointerPath = (place) => `${dataDir()}/pointers/${place}.json`;
 const jobDir = (place) => `${dataDir()}/jobs/${place}`;
+const readPath = (top) => `${dataDir()}/read/${longHash(top)}.json`;
 
 async function readJson(path) {
   try {
@@ -37,7 +41,7 @@ async function write(path, text) {
 
 export async function ensureDirs() {
   const d = dataDir();
-  await exec("mkdir", ["-p", `${d}/entries`, `${d}/pointers`, `${d}/jobs`]);
+  await exec("mkdir", ["-p", `${d}/entries`, `${d}/pointers`, `${d}/jobs`, `${d}/read`]);
 }
 
 /**
@@ -179,6 +183,24 @@ export async function closeTurn(top, turn) {
   await write(`${turn.dir}/end.meta`, `tree=${tree}\nended=${Math.floor(Date.now() / 1000)}\ninterrupted=1\n`);
 }
 
+/** The hunks read in a repository: { "<path>:<digest>": ms }, empty when none are. */
+export async function loadRead(top) {
+  const read = await readJson(readPath(top));
+  return read && typeof read === "object" && !Array.isArray(read) ? read : {};
+}
+
+/**
+ * Writes this window's marks (the `keys` it changed, as `read` has them) over
+ * what is on disk now, so two windows on one repository keep each other's.
+ * @returns {Promise<Record<string, number>>} the record as written
+ */
+export async function saveRead(top, read, keys) {
+  await ensureDirs();
+  const merged = mergeRead(await readJson(readPath(top)), read, keys);
+  await write(readPath(top), JSON.stringify(merged));
+  return merged;
+}
+
 /** The prompt that would be sent, to size it before anything is spent. */
 export function preparePrompt(diff, { language, previous, preferences = "" }) {
   return buildPrompt({ digest: diff.text, fileCount: diff.fileCount, hunkCount: diff.hunkCount, what: diff.what, language, previous, preferences });
@@ -197,7 +219,7 @@ export async function jobOf(repo, sk) {
 }
 
 /** Starts a generation in the background and returns its job. */
-export async function startJob(repo, diff, { key, model, language, prompt, source, auto = false }) {
+export async function startJob(repo, diff, { key, model, language, prompt, source, auto = false, before = [] }) {
   await ensureDirs();
   const dir = jobDir(placeKey(repo.top, diff.sk));
   // A run still going there (another window started it) is stopped, not orphaned.
@@ -206,7 +228,7 @@ export async function startJob(repo, diff, { key, model, language, prompt, sourc
   await exec("mkdir", ["-p", dir]);
   const meta = {
     key, code: codeKey(diff.files), model, language, top: repo.top, source, sk: diff.sk, started: Date.now(), deadline: Date.now() + deadline(diff.hunkCount),
-    idByAlias: diff.idByAlias, digestFiles: diff.digestFiles, hunkCount: diff.hunkCount, auto,
+    idByAlias: diff.idByAlias, digestFiles: diff.digestFiles, hunkCount: diff.hunkCount, auto, before,
   };
   await writeTextFile(`${dir}/system.txt`, prompt.system, null);
   await writeTextFile(`${dir}/prompt.txt`, prompt.prompt, null);
@@ -277,7 +299,8 @@ export async function finishJob(job) {
     const { raw, cost } = readOutcome({ out: await read("out.json"), err: await read("err.txt"), code: job.code });
     const walkthrough = normalize(raw, job.meta.idByAlias, job.meta.digestFiles);
     const { key, model, language, top, source, sk } = job.meta;
-    const entry = { version: VERSION, key, code: job.meta.code, model, language, top, source, sk, generatedAt: Date.now(), took: Date.now() - job.meta.started, cost, walkthrough };
+    // `before`: the hunks of the walkthrough shown when this one was asked for, to tell what changed since it was read.
+    const entry = { version: VERSION, key, code: job.meta.code, model, language, top, source, sk, generatedAt: Date.now(), took: Date.now() - job.meta.started, cost, walkthrough, before: job.meta.before ?? [] };
     await ensureDirs();
     await write(entryPath(key), JSON.stringify(entry));
     await write(pointerPath(placeKey(top, sk)), JSON.stringify({ key, top, source: sk }));

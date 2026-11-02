@@ -63,10 +63,14 @@ A dialog 74% of the window wide and 80% tall (`modal`), on `theme().popover`; as
      - Contents: the title 13.5px semibold, the summary 12px `muted` (line height 1.5), then
        each part's title 10px uppercase `dim` and its steps: an 18px square (radius 5) with
        the step number in `muted` on `raised`, ✓ in `ansi2` on `raised` once read, `!` in
-       `blocked` on `blocked` + `29` alpha when outdated; the title 12.5px (`muted` for skim
+       `blocked` on `blocked` + `29` alpha when outdated, the number in `accent` on `accent` +
+       `29` with a tooltip when it changed since it was read; the title 12.5px (`muted` for skim
        steps), and a 6px `accent` dot for key steps. Every row has a 2px left border, `accent`
-       on the chosen row (which is on `accent` + `1f` alpha) and transparent otherwise. After a
-       rule, "… Not covered" with its count, then "Haiku · English · date · $0.002" in
+       on the chosen row (which is on `accent` + `1f` alpha) and transparent otherwise. With
+       Unread only on, "Unread only · u shows all" in `accent` 11px under the summary, and only
+       the steps not read plus the one on screen ("Every step is read." when none). After a
+       rule, "… Not covered" with its count (in `accent` while some of its hunks aren't read),
+       then "Haiku · English · date · $0.002" in
        `dim` 10.5px. Hidden when the walkthrough is narrower than 720px.
      - Banners over the page (7px radius, 1px border): "Writing a new walkthrough with
        Haiku… 0:12" + Cancel (`accent`); a red error; "Written for an earlier state of this
@@ -74,9 +78,11 @@ A dialog 74% of the window wide and 80% tall (`modal`), on `theme().popover`; as
        or "Showing the English walkthrough by Haiku. There's none in Türkçe by Sonnet for
        this code yet." + Generate; or, when the code is the same and only the preferences or
        the prompt version changed, "This code hasn't changed, but your preferences or this
-       mod's prompt have since this walkthrough was written." + Regenerate.
+       mod's prompt have since this walkthrough was written." + Regenerate; and "3 steps
+       changed since you last read them." + "Go →" (`accent`), each press the next such step.
      - Page, scrolling, padding 16px 22px, gap 10: "PART · STEP 2 OF 5" 10.5px semibold
-       `dim`; the title 17px semibold with tinted chips **Key change** (`accent` on `accent`
+       `dim`, at its right a small ghost "Mark read" / "✓ Read" (disabled on an outdated
+       step); the title 17px semibold with tinted chips **Key change** (`accent` on `accent`
        + `14`), **Context** (on `raised`), **Outdated** (`blocked` on `blocked` + `14`); the
        explanation 13.5px, line height 1.6, at most 820px wide; notes, full width up to
        820px, as a `blocked` chip on `blocked` + `12` (Decision, Upkeep, Limitation,
@@ -95,9 +101,13 @@ A dialog 74% of the window wide and 80% tall (`modal`), on `theme().popover`; as
        + `1a`. At most 2,500 lines per page, then "N more lines not drawn here."
      - Not covered page: the title, one paragraph, then a bordered card per file: ▶/▼,
        path, the model's note or "Generated file, not sent to the model." / "Binary file." /
-       "Not read: larger than 1 MB.", status and `+n −n`; a card opens to its hunks.
+       "Not read: larger than 1 MB.", status and `+n −n`; a card with hunks not read has an
+       `accent` border and an "Unread" / "2 unread" chip, a read one's path is `muted`; a small
+       ghost "Mark read" / "✓ Read" marks all its hunks. A card opens to its hunks; one not read
+       has its hunk header in `accent` on `accent` + `1f`, starting "● ".
 4. **Footer** (with a walkthrough), 44px, top border: "← Previous", "Next →" ("Not
-   covered →" on the last step), "2 of 5 read · ← → to move" or "End of the walkthrough";
+   covered →" on the last step), "2 / 5 read · ← → to move" or "End of the walkthrough ·
+   2 / 5 read", a ghost "Unread only" / "Show all";
    at the right, on the Pull request tab, a ghost "Post to #12", then a ghost "Copy as
    Markdown", the last send's, copy's or post's result (in `ansi2` with a ✓ when it
    worked), "Click a line to comment" or "2 comments", and with
@@ -122,8 +132,19 @@ A dialog 74% of the window wide and 80% tall (`modal`), on `theme().popover`; as
 - Regenerating over an earlier state of the code, with the same model and language, sends
   the old walkthrough (titles and text, no hunk references) to be revised; another model or
   language writes its own.
-- Steps: click one in the contents, ← → / j k / n p, or Previous/Next. Visiting a step
-  ticks it; a different walkthrough starts over at step 1.
+- Steps: click one in the contents, ← → / j k / n p, or Previous/Next. Moving on from a
+  step (→, Next, `walkthrough.next`) marks its hunks read; clicking in the contents marks
+  nothing. `x` (or the page's button) marks the step read or unread. A different walkthrough
+  opens on its first step not read.
+- Read is per hunk, per repository, not per walkthrough or scope: the key is the hunk id
+  without its scope (`path:digest`), so staging a hunk, switching scope or regenerating
+  keeps it read, and a step of read hunks is ticked in any walkthrough. A step is read when
+  all its hunks are and it isn't outdated. `u` (or `walkthrough.unread`, or the footer
+  button) lists and steps through only the steps not read; back before the first stays put,
+  on past the last is Not covered.
+- Changed since read: a step not read now that holds a read hunk (outdated, or a new hunk
+  beside read ones), or a hunk in a file where a read hunk of the walkthrough shown when
+  this one was generated (`before` in the entry) is no longer in the diff.
 - Comments: click a line to select it (`selection`) and open a box under it (input, Add,
   Cancel; Enter adds). A commented line shows the comment under it with ✕. Send pastes
   "Comments from reading the walkthrough of …" and one line per comment
@@ -181,7 +202,8 @@ A dialog 74% of the window wide and 80% tall (`modal`), on `theme().popover`; as
   `shared("walkthrough.prefs")`. The first language is the system's (`defaults read -g
   AppleLanguages`, else `$LANG`).
 - Keys from `keys.json`: `cmd-shift-k` → `mod.open:walkthrough`. Mod commands:
-  `walkthrough.generate`, `.cancel`, `.next`, `.prev`, `.copy`.
+  `walkthrough.generate`, `.cancel`, `.next`, `.prev`, `.copy`, `.unread`. In the view, `x`
+  marks the step read or unread and `u` toggles Unread only.
 
 ## Built from
 
@@ -196,7 +218,8 @@ A dialog 74% of the window wide and 80% tall (`modal`), on `theme().popover`; as
   name only), `digest.js` (`=== path (status) [scope]`, then `[h1] @@ … @@` and the lines;
   generated files left out), `prompt.js`, `walkthrough.js` (JSON schema, `normalize`,
   `parseJson`, `overlay`), `sources.js` (git), `cache.js` (keys, limits), `job.js`
-  (`run.sh`, reading the answer), `languages.js`, `comments.js`.
+  (`run.sh`, reading the answer), `languages.js`, `comments.js`, `read.js` (read keys,
+  `stepRead`, `markStep`/`unmarkStep`, `prune`, `mergeRead`, `changedSince`).
 - Git, with `--no-optional-locks -c core.fsmonitor=false -c core.quotePath=false -c
   diff.autoRefreshIndex=false` and `--no-color --no-ext-diff --no-textconv
   --src-prefix=a/ --dst-prefix=b/ -M`: staged `diff --cached`, unstaged `diff` plus every
@@ -215,7 +238,10 @@ A dialog 74% of the window wide and 80% tall (`modal`), on `theme().popover`; as
 - Storage: `entries/<key>.json` (key: hash of version, prompt version, repo, scope, model,
   language, `preferences.md` and the path, status and hunk ids of every file the model
   reads: generated and unread files don't count), `pointers/<hash(repo, scope)>.json`,
-  the newest 200 entries kept.
+  the newest 200 entries kept. An entry also holds `before`: the hunk ids of the walkthrough
+  shown when it was asked for. `read/<hash(repo)>.json` is `{ "path:digest": ms }`, the
+  newest 5,000 marks kept, written on the 1s tick when something changed: this window's
+  changed keys over what is on disk now, so two windows keep each other's marks.
 - `herdr`: `exec`, `hc` (`send`), `readTextFile`, `writeTextFile`, `watchFolder`, `home`,
   `appHome`, `focused`, `panes`, `spaces`, `agents`, `notify`, `shared`/`setShared`,
   `nextCommand`, `props`, `closeOverlay`, `theme`, `settings().font_family`. Programs run:
@@ -322,6 +348,12 @@ snapshot run again without it. It prints nothing and always exits 0.
 - `<mod>.<command>` reaches a copy opened after the last save of the mod; a copy reloaded
   in place by a save does not get them until it is opened again.
 - A diff over 640,000 prompt characters (≈ 175k tokens) is refused, never clipped.
+- Keep read marks without the scope (`staged:` / `working:` …), or staging a hunk unreads it.
+  Scopes hold no colon; paths may, so the path of a key is everything before its last colon.
+- Don't tick a step for being visited: an outdated step's read hunks still describe code
+  that's gone. A step is read when all its hunks are and it isn't outdated.
+- Write read marks by merging the keys changed here into the file as it is now; writing the
+  whole record back would drop another window's marks.
 - Remote spaces are not supported.
 - A UserPromptSubmit hook's plain stdout is added to Claude's context: `turn.sh` must
   print nothing, errors included. Claude Code runs no Stop hook for a turn stopped with
@@ -365,3 +397,8 @@ snapshot run again without it. It prints nothing and always exits 0.
   `.git/index` and `.git/objects` are byte for byte and time for time as they were.
 - In a pane with Auto on, an agent finishing a turn brings a "Walkthrough ready"
   notification and the turn's walkthrough, by Haiku.
+- → through two steps ticks them; close and reopen: the ticks are there, "2 / N read", and it
+  opens on the first step not read. Stage the code: still ticked. `u` hides the read steps.
+- Edit a line a read step covers and reopen: "1 step changed since you last read it." Go →
+  lands on it; under Not covered the edit is "Unread". Regenerate: steps whose hunks didn't
+  change are ticked at once.
