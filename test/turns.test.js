@@ -19,6 +19,10 @@ test("the hook's JSON: prompt, session and folder, even cut short", () => {
   assert.equal(parseHook(cut).prompt, "Fix the \"bug\"\nth");
   assert.equal(parseHook(`${json.slice(0, json.indexOf("\\n") + 1)}`).prompt, "Fix the \"bug\"");
   assert.deepEqual(parseHook(""), { prompt: "", session: null, cwd: null, event: null });
+  // `hc send` wraps what it pastes; a cut prompt may have lost the closing tag.
+  assert.equal(parseHook(JSON.stringify({ prompt: '<hc from="t3m">Add subtract</hc>' })).prompt, "Add subtract");
+  assert.equal(parseHook(JSON.stringify({ prompt: '<hc from="t3m">Add sub' })).prompt, "Add sub");
+  assert.equal(parseHook(JSON.stringify({ prompt: "Use <hc> tags" })).prompt, "Use <hc> tags");
 });
 
 test("meta lines", () => {

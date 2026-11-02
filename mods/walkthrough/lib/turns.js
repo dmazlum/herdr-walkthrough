@@ -17,8 +17,11 @@ export function parseHook(text) {
     if (!m) return null;
     try { return JSON.parse(`"${m[1].replace(/\\(u[0-9a-fA-F]{0,3})?$/, "")}"`); } catch { return m[1]; }
   };
-  return { prompt: get("prompt") ?? "", session: get("session_id"), cwd: get("cwd"), event: get("hook_event_name") };
+  return { prompt: unwrap(get("prompt") ?? ""), session: get("session_id"), cwd: get("cwd"), event: get("hook_event_name") };
 }
+
+/** A prompt pasted in by `hc send` (another agent, or the walkthrough's own comments) comes wrapped as <hc from="t3">…</hc>. */
+export const unwrap = (prompt) => /^<hc from="[^"]*">([\s\S]*?)(?:<\/hc>\s*)?$/.exec(prompt)?.[1] ?? prompt;
 
 /** `key=value` lines → an object. */
 export function parseMeta(text) {
