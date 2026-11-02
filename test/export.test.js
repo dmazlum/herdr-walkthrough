@@ -37,7 +37,8 @@ test("markdown keeps the order, weights, notes and file totals, and leaves the c
     { title: "Greet", hunks: ["h3"], weight: "skim", text: "A new file.", notes: [] },
   ], [{ path: "src/a.js", note: "A spacer line." }]);
   const md = toMarkdown(overlay(w, files), w, { what: "Uncommitted local changes.", model: "Haiku", language: "English", cost: 0.0021 });
-  assert.equal(md, `## Rename the flag
+  assert.equal(md, `<!-- walkthrough -->
+## Rename the flag
 
 Why it moved.
 
@@ -68,6 +69,7 @@ A new file.
 Edits in 1 file that no step explains:
 
 - \`src/a.js\` (1 hunk) — A spacer line.
+<!-- /walkthrough -->
 `);
   assert.doesNotMatch(md, /\+new|-old/);
 });

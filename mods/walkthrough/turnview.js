@@ -153,14 +153,17 @@ export async function autoGenerate(v, cx, turn) {
     const source = turnSource(turn);
     const diff = await readDiff(v.repo, source);
     if (!diff.hunkCount || diff.hunkCount > AUTO_MAX_HUNKS) return;
-    const preferences = await readPreferences();
+    // Matched against the turn's prompt, as a click on Generate would be: the same task, the same key.
+    const [preferences, task] = await Promise.all([readPreferences(), v.taskFor(source)]);
     // One by the model picked here counts too: it is the one that would be shown.
-    const key = keyFor(v.repo, diff, AUTO_MODEL, v.language, preferences);
-    if (await hasEntry(key) || await hasEntry(keyFor(v.repo, diff, v.model, v.language, preferences))) return;
+    const key = keyFor(v.repo, diff, AUTO_MODEL, v.language, preferences, task);
+    if (await hasEntry(key) || await hasEntry(keyFor(v.repo, diff, v.model, v.language, preferences, task))) return;
+    // One written before tasks were matched (or with the task off) is shown with a Regenerate banner; it isn't paid for twice unasked.
+    if (task && (await hasEntry(keyFor(v.repo, diff, AUTO_MODEL, v.language, preferences)) || await hasEntry(keyFor(v.repo, diff, v.model, v.language, preferences)))) return;
     if (await jobOf(v.repo, diff.sk)) return;
-    const prompt = preparePrompt(diff, { language: v.language, previous: null, preferences });
+    const prompt = preparePrompt(diff, { language: v.language, previous: null, preferences, task });
     if (!fits(prompt)) return;
-    const job = await startJob(v.repo, diff, { key, model: AUTO_MODEL, language: v.language, prompt, source, auto: true });
+    const job = await startJob(v.repo, diff, { key, model: AUTO_MODEL, language: v.language, prompt, source, auto: true, task });
     // Followed here as well as by the view while the turn is shown, so switching away doesn't orphan it.
     v.background.push({ job });
     if (v.diff?.sk === diff.sk) v.setJob(job);
@@ -179,8 +182,12 @@ export function hookHelp(v, t) {
       .child(div().text_size(18).font_semibold().child("No turns recorded in this repository yet"))
       .child(div().text_size(13).text_color(t.muted).child("Last turn reads what an agent changed while answering one prompt. Two Claude Code hooks record it: one takes a snapshot of the working tree when you send a prompt, the other when the agent stops. Snapshots go to ~/.herdr/walkthrough/turns/, never into the repository's .git; the newest 20 per repository are kept."))
       .child(div().text_size(13).text_color(t.muted).child("Add these to ~/.claude/settings.json, beside any hooks you already have. The walkthrough doesn't change your settings itself. Turns are recorded from the next prompt on."))
-      .child(v_flex().w_full().p(10).rounded(8).border_1().border_color(t.border).bg(t.raised).font_family(font).text_size(11.5)
-        .children(snippet.split("\n").map((line) => div().whitespace_nowrap().child(line || " "))))
+      // A line longer than the box wraps under its own indent instead of spilling out of it; Copy settings copies the text itself.
+      .child(v_flex().w_full().min_w(0).p(10).rounded(8).border_1().border_color(t.border).bg(t.raised).font_family(font).text_size(11.5)
+        .children(snippet.split("\n").map((line) => {
+          const indent = /^ */.exec(line)[0].length;
+          return div().w_full().min_w(0).pl(indent * 7).child(line.trimStart() || " ");
+        })))
       .child(h_flex().gap(10).items_center()
         .child(button(t, "copy-hooks", "Copy settings", (_e, cx) => cx.spawn(async (cx) => {
           try { await copyText(snippet); v.sent = "Copied the hook settings."; } catch (e) { v.sent = `Couldn't copy: ${String(e?.message ?? e)}`; }

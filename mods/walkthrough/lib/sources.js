@@ -338,13 +338,41 @@ export function ghError(text) {
   return t.split("\n").filter(Boolean).pop() || "gh failed.";
 }
 
-/** The repository's open pull requests, newest update first: { number, title, head, base, author, draft, when, current }. */
+/**
+ * The repository's open pull requests, newest update first: { number, title,
+ * body, head, base, author, draft, updated, current }. The description comes
+ * with the list, so matching a pull request against it costs no other call.
+ */
 export async function pullRequests(exec, top, branch = null) {
-  const out = await gh(exec, top, ["pr", "list", "--state", "open", "--limit", "50", "--json", "number,title,headRefName,baseRefName,author,isDraft,updatedAt"]);
+  const out = await gh(exec, top, ["pr", "list", "--state", "open", "--limit", "50", "--json", "number,title,body,headRefName,baseRefName,author,isDraft,updatedAt"]);
   let list;
   try { list = JSON.parse(out || "[]"); } catch { throw new Error("gh answered with something other than a list of pull requests."); }
   return list
-    .map((p) => ({ number: p.number, title: p.title ?? "", head: p.headRefName ?? "", base: p.baseRefName ?? "", author: p.author?.login ?? "",
+    .map((p) => ({ number: p.number, title: p.title ?? "", body: typeof p.body === "string" ? p.body : "", head: p.headRefName ?? "", base: p.baseRefName ?? "", author: p.author?.login ?? "",
       draft: Boolean(p.isDraft), updated: p.updatedAt ?? "", current: Boolean(branch) && p.headRefName === branch }))
     .sort((a, b) => b.updated.localeCompare(a.updated));
+}
+
+/** A commit's whole message, subject and body; null when git couldn't read it (so it can be asked again). */
+export async function commitMessage(exec, top, hash) {
+  const r = await git(exec, top, ["log", "-1", "--format=%B", hash, "--"]);
+  return r.ok ? r.out.trim() : null;
+}
+
+/**
+ * Since when (ms) the prompts sent to agents count as the task of a working
+ * tree or branch source, and how to say so: the last commit for local
+ * changes, where the branch left its base for a branch. 0 in a repository
+ * with no commits.
+ * @returns {Promise<{ since: number, label: string }>}
+ */
+export async function taskSince(exec, top, source) {
+  let at = "HEAD", label = "the last commit";
+  if (source.kind === "branch") {
+    const base = await git(exec, top, ["merge-base", source.base, "HEAD"]);
+    if (base.ok && base.out.trim()) { at = base.out.trim(); label = `the branch left ${source.base}`; }
+  }
+  const r = await git(exec, top, ["log", "-1", "--format=%ct", at, "--"]);
+  const seconds = r.ok ? Number(r.out.trim()) : 0;
+  return { since: Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 0, label: seconds > 0 ? label : "the repository began" };
 }

@@ -26,7 +26,11 @@ A dialog 74% of the window wide and 80% tall (`modal`), on `theme().popover`; as
      turn, once a turn is recorded, a dropdown of the turns (the prompt's first line, hint
      "5 min ago · took 1:20 · t3", "still running" or "interrupted") and **Auto: while
      open** / **Auto: off**.
-   - right: a braille spinner while the diff is read, the model dropdown (Haiku, Sonnet,
+   - right: a braille spinner while the diff is read, once a diff is read the task dropdown
+     ("Task: prompt", "Task: PR description", "Task: commit message", "Task: 3 prompts",
+     "Task: yours", "Task: none" when nothing was found, "Task: off"; rows Found (hint: where
+     it came from, or "Nothing found for this change"), Your own… (hint: its first line) and
+     Off), the model dropdown (Haiku, Sonnet,
      Opus), the language dropdown (its own name: Türkçe, Deutsch …), and the action:
      **Generate** (solid) with nothing exact on screen, **Regenerate** (outline) over an
      exact one, **Cancel** while one is running.
@@ -39,6 +43,11 @@ A dialog 74% of the window wide and 80% tall (`modal`), on `theme().popover`; as
      through `on_item_click`, since virtual list rows take no handlers. The menu and the
      backdrop under it stop the wheel (`on_scroll_wheel` → `stop_propagation`), so only
      the menu scrolls while it is open.
+   - **Task editor**, under the toolbar while Your own… is being written: on `raised`, a
+     `muted` line (what it does, that it stays local and isn't posted), a `Textarea` (3 to
+     10 rows, filled with the task found when there is no own one yet), a solid **Use this
+     task**, a ghost Cancel and "120 / 6,000" (red past the limit, which disables the
+     button). An empty task goes back to Found. Esc, or another source, closes it.
 3. **Body**, the rest. One of:
    - a centered message: another machine, "Reading…", "Not a git repository.", "Pick the
      branch to compare with.", "Pick a pull request.", "Reading the pull requests…",
@@ -47,11 +56,13 @@ A dialog 74% of the window wide and 80% tall (`modal`), on `theme().popover`; as
      or the git or gh error;
    - **hook help** (Last turn, no turn recorded), a 620px column: "No turns recorded in this
      repository yet" 18px semibold, two `muted` paragraphs (what the hooks do, where the
-     snapshots go, that the walkthrough doesn't edit settings), the settings JSON in the
+     snapshots go, that the walkthrough doesn't edit settings), the settings JSON (the script
+     path from `$HOME`, long lines wrapping under their own indent) in the
      terminal font on `raised` in a bordered box, and a solid **Copy settings**;
    - **intro** (no walkthrough yet), a 620px column: "Read this change in the order it
      makes sense" 18px semibold, one paragraph in `muted`, chips for files, hunks,
-     "≈ 3k tokens" (red past the limit), "N generated, not sent" and "N not read", red
+     "≈ 3k tokens" (red past the limit), "N generated, not sent", "N not read" and, with a
+     task, "Task: prompt" in `accent` (tooltip: where it came from), red
      notices when `claude` is missing or the diff is too large, the solid
      "Generate walkthrough with Haiku" button and "in English", then a bordered list of the
      changed files (26px rows: path, a "generated" chip, status, `+n` in `ansi2`, `−n` in
@@ -67,7 +78,10 @@ A dialog 74% of the window wide and 80% tall (`modal`), on `theme().popover`; as
        `29` with a tooltip when it changed since it was read; the title 12.5px (`muted` for skim
        steps), and a 6px `accent` dot for key steps. Every row has a 2px left border, `accent`
        on the chosen row (which is on `accent` + `1f` alpha) and transparent otherwise. With
-       Unread only on, "Unread only · u shows all" in `accent` 11px under the summary, and only
+       Unread only on, "Unread only · u shows all" in `accent` 11px under the summary. A
+       walkthrough matched against a task has a **Task** row next, shaped like a step's: `◎`
+       in `accent`, "Task", and "2 / 3" (requests shown in this diff / all, in `ansi3` while
+       some aren't, "—" for none). Then only
        the steps not read plus the one on screen ("Every step is read." when none). After a
        rule, "… Not covered" with its count (in `accent` while some of its hunks aren't read),
        then "Haiku · English · date · $0.002" in
@@ -78,12 +92,30 @@ A dialog 74% of the window wide and 80% tall (`modal`), on `theme().popover`; as
        or "Showing the English walkthrough by Haiku. There's none in Türkçe by Sonnet for
        this code yet." + Generate; or, when the code is the same and only the preferences or
        the prompt version changed, "This code hasn't changed, but your preferences or this
-       mod's prompt have since this walkthrough was written." + Regenerate; and "3 steps
+       mod's prompt have since this walkthrough was written." + Regenerate, or, when it was the
+       task, "The task has changed since this walkthrough was matched against it.", "This
+       walkthrough was written without a task. Regenerate to match the change against it."
+       or "This walkthrough was matched against a task that is now off or gone."; and "3 steps
        changed since you last read them." + "Go →" (`accent`), each press the next such step.
+     - Task page (before the first step, with a task): "TASK · THE TURN'S PROMPT" 10.5px
+       semibold `dim`, a ghost "Show the task" / "Hide the task" at its right (the task's
+       text on `raised`, line by line, and a line when the session's earlier prompts were
+       given too); "What the task asks for" 17px semibold; one `muted` paragraph saying it
+       tells where a request shows up, not whether it is done well; then a row per request
+       with a bottom border: ✓ `ansi2` (seen), ◐ `ansi3` (partly), ○ `dim` (absent), each
+       with a tooltip, the request 13.5px (`muted` when absent), then a **Partly** chip or
+       "Not in this diff", a 20px bordered chip per step ("3. title", a click goes there),
+       "and 2 hunks under Not covered" (a click goes there), **Outdated** when its code
+       changed. Then "Not tied to any request" 14px semibold, a `muted` line, and a chip per
+       such step. With no concrete request: a `muted` notice instead of the rows. A new
+       walkthrough with a task opens here while none of its steps is read.
      - Page, scrolling, padding 16px 22px, gap 10: "PART · STEP 2 OF 5" 10.5px semibold
        `dim`, at its right a small ghost "Mark read" / "✓ Read" (disabled on an outdated
        step); the title 17px semibold with tinted chips **Key change** (`accent` on `accent`
-       + `14`), **Context** (on `raised`), **Outdated** (`blocked` on `blocked` + `14`); the
+       + `14`), **Context** (on `raised`), **Outdated** (`blocked` on `blocked` + `14`);
+       with a task that names requests, a chip per request the step serves, "For: Retry
+       failed uploads" (`ansi2` on `ansi2` + `12`, the whole request as tooltip), or "Not
+       tied to a request" on `raised`; a click on either goes to the task page; the
        explanation 13.5px, line height 1.6, at most 820px wide; notes, full width up to
        820px, as a `blocked` chip on `blocked` + `12` (Decision, Upkeep, Limitation,
        Divergence, Untested, each with a tooltip) beside 12.5px `muted` text that wraps; for an outdated step "1 of the 2 hunks this step described
@@ -105,8 +137,9 @@ A dialog 74% of the window wide and 80% tall (`modal`), on `theme().popover`; as
        `accent` border and an "Unread" / "2 unread" chip, a read one's path is `muted`; a small
        ghost "Mark read" / "✓ Read" marks all its hunks. A card opens to its hunks; one not read
        has its hunk header in `accent` on `accent` + `1f`, starting "● ".
-4. **Footer** (with a walkthrough), 44px, top border: "← Previous", "Next →" ("Not
-   covered →" on the last step), "2 / 5 read · ← → to move" or "End of the walkthrough ·
+4. **Footer** (with a walkthrough), 44px, top border: "← Previous" ("← Task" on the first
+   step with a task page; disabled on the first page), "Next →" ("First step →" on the task
+   page, "Not covered →" on the last step), "2 / 5 read · ← → to move" or "End of the walkthrough ·
    2 / 5 read", a ghost "Unread only" / "Show all";
    at the right, on the Pull request tab, a ghost "Post to #12", then a ghost "Copy as
    Markdown", the last send's, copy's or post's result (in `ansi2` with a ✓ when it
@@ -189,6 +222,46 @@ A dialog 74% of the window wide and 80% tall (`modal`), on `theme().popover`; as
   every 15 s. New files over 1 MB in the end snapshot (`end.big`) and not in the start's
   (`start.big`) are left out of the diff and listed "Not read: larger than 1 MB."
 - Picking a turn pins it, unless it is the one that would be picked anyway.
+- **Task** (`lib/task.js`): what a source is matched against, read with the diff on each
+  reload. Found: a turn's prompt (unwrapped from `<hc from>`), with up to 3 earlier prompts
+  of its session as context; a pull request's title and body (from the `gh pr list` call,
+  which asks for `body` too), HTML comments and anything between `<!-- walkthrough -->` and
+  `<!-- /walkthrough -->` left out; a commit's `git log -1 --format=%B`, trailers
+  (Signed-off-by, Co-Authored-By …) and a merge's generated subject left out; for
+  Uncommitted, Staged, Unstaged and Branch, the prompts typed into Claude Code in this
+  repository since the last commit's committer time (Branch: the merge base's), numbered,
+  oldest first. Those come from `${CLAUDE_CONFIG_DIR:-~/.claude}/projects/<path with every
+  character but a letter or digit made "-">*/*.jsonl` (files touched since then; lines
+  `"type":"user"` whose `"cwd":"` is the repository or below it, kept with `grep -F` before
+  anything is cut, so a sibling folder sharing the prefix can't crowd them out; without
+  `tool_result`, `isSidechain`, `isMeta`; an image's base64 `data` emptied, never a line
+  cut; at most 4 MB in all; then compaction summaries, non-human origins, commands and
+  their output dropped, each `uuid` once), read at most every 5 s; with none there, the recorded turns' prompts since
+  then. Slash commands alone, "[Request interrupted …" and empty prompts are no task. At
+  most 6,000 characters (2,000 per message; past that the first and the newest that fit).
+  Your own: per repository and source in the prefs (`tasks`, the newest 100); the text is kept while Found or Off is picked. Off: none. A commit message git couldn't read is asked again on the next read.
+  Reading a task never fails the walkthrough: one that can't be read is no task.
+- With a task, the system prompt gets the task rules and the prompt a `<task>` block (and
+  `<earlier>` for context) before the digest, with every `<` that starts a `task` or
+  `earlier` tag inside it (spaced, upper-case, `</task` with no `>`) turned into `‹`; the
+  schema requires `asks`: `{ text, hunks, coverage: seen | partly | absent }`.
+  `normalize` keeps 12, maps aliases to hunk ids (dropping unknown ones), makes a request
+  with no hunk found `absent` and one called absent with hunks `partly`. The cache key gets
+  the task's hash only when there is a task (`taskCacheKey`), so a walkthrough without one
+  keeps its key and its prompt byte for byte; a task of prompts to agents adds the constant
+  `prompts`, not its words, so another prompt ("thanks", the walkthrough's own Send) leaves
+  the walkthrough exact, and its task page says "Matched against the prompts as they were
+  when it was written; 5 prompts sent to agents now. Regenerate to match against them too."
+  The banner compares the same keys. Auto doesn't write a turn that already has a
+  walkthrough written without a task. The entry keeps `task: { from, label, short, text, context,
+  key }`. `overlayAsks` lays the requests over the shown diff: their steps, hunks only
+  under Not covered, hunks gone (Outdated), and the steps no request names (none when
+  there is no request).
+- Copy as Markdown adds "### Task", the source as `<sub>`, then `- ✓ request — step 2`,
+  `◐ … — partly, steps 3, 4, Not covered`, `○ … — not in this diff`, and "Not tied to any
+  request: step 5." Post to #12 leaves the task out unless it came from that pull
+  request's description. The whole Markdown sits between `<!-- walkthrough -->` and
+  `<!-- /walkthrough -->`.
 - **Auto** (`autoGenerate` in the prefs: `on-open`, the default, or `off`): on open, the
   turn the tab shows, when finished and without a walkthrough by Haiku or by the picked
   model, is written with Haiku in the background (followed to its end even when another
@@ -202,8 +275,8 @@ A dialog 74% of the window wide and 80% tall (`modal`), on `theme().popover`; as
   `shared("walkthrough.prefs")`. The first language is the system's (`defaults read -g
   AppleLanguages`, else `$LANG`).
 - Keys from `keys.json`: `cmd-shift-k` → `mod.open:walkthrough`. Mod commands:
-  `walkthrough.generate`, `.cancel`, `.next`, `.prev`, `.copy`, `.unread`. In the view, `x`
-  marks the step read or unread and `u` toggles Unread only.
+  `walkthrough.generate`, `.cancel`, `.next`, `.prev`, `.copy`, `.unread`, `.task` (opens the task editor). In the view, `x`
+  marks the step read or unread, `u` toggles Unread only and `t` opens the task page.
 
 ## Built from
 
@@ -219,7 +292,9 @@ A dialog 74% of the window wide and 80% tall (`modal`), on `theme().popover`; as
   generated files left out), `prompt.js`, `walkthrough.js` (JSON schema, `normalize`,
   `parseJson`, `overlay`), `sources.js` (git), `cache.js` (keys, limits), `job.js`
   (`run.sh`, reading the answer), `languages.js`, `comments.js`, `read.js` (read keys,
-  `stepRead`, `markStep`/`unmarkStep`, `prune`, `mergeRead`, `changedSince`).
+  `stepRead`, `markStep`/`unmarkStep`, `prune`, `mergeRead`, `changedSince`), `task.js`
+  (where a task comes from, transcripts, `resolveTask`, `taskKey`, the transcript listing
+  script).
 - Git, with `--no-optional-locks -c core.fsmonitor=false -c core.quotePath=false -c
   diff.autoRefreshIndex=false` and `--no-color --no-ext-diff --no-textconv
   --src-prefix=a/ --dst-prefix=b/ -M`: staged `diff --cached`, unstaged `diff` plus every
@@ -245,7 +320,8 @@ A dialog 74% of the window wide and 80% tall (`modal`), on `theme().popover`; as
 - `herdr`: `exec`, `hc` (`send`), `readTextFile`, `writeTextFile`, `watchFolder`, `home`,
   `appHome`, `focused`, `panes`, `spaces`, `agents`, `notify`, `shared`/`setShared`,
   `nextCommand`, `props`, `closeOverlay`, `theme`, `settings().font_family`. Programs run:
-  `git`, `claude`, `sh`, `env`, `nohup`, `kill`, `mkdir`, `rm`, `ls`, `wc`, `defaults`.
+  `git`, `claude`, `sh`, `env`, `nohup`, `kill`, `mkdir`, `rm`, `ls`, `wc`, `defaults`,
+  `stat`, `grep`, `cut`, `tail`.
 - `turnview.js` (the Last turn tab's state, Auto and the hook help), `lib/turns.js` (the
   hook's JSON, `.meta` lines, the folder listing, where each turn ended, the settings
   snippet), `hooks/turn.sh`.
@@ -402,3 +478,14 @@ snapshot run again without it. It prints nothing and always exits 0.
 - Edit a line a read step covers and reopen: "1 step changed since you last read it." Go →
   lands on it; under Not covered the edit is "Unread". Regenerate: steps whose hunks didn't
   change are ticked at once.
+- Commit on a commit with a body shows "Task: commit message"; Generate opens on the task
+  page, each request with its steps, and each step says which request it serves. A merge
+  of a pull request is matched against the pull request's title, not "Merge pull request
+  #8 from …".
+- Task → Off, Generate: no task page, no Task row, and the key and prompt are those of a
+  walkthrough written before tasks existed. Task → Your own…, write one, Use this task:
+  "The task has changed since …" until Regenerate.
+- With local edits made after prompts to Claude Code in the repository, Uncommitted shows
+  "Task: 2 prompts"; a question or "thanks" among them isn't a request.
+- Post to #12 of a walkthrough matched against your own words posts no Task section;
+  matched against #12's description, it does.
