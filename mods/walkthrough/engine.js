@@ -56,7 +56,9 @@ export async function copyText(text) {
   if (r.code !== 0) throw new Error((r.stderr || "No clipboard program found (pbcopy, wl-copy or xclip).").trim());
 }
 
-const COPY = 'if command -v pbcopy >/dev/null; then pbcopy < "$1"; elif command -v wl-copy >/dev/null; then wl-copy < "$1"; elif command -v xclip >/dev/null; then xclip -selection clipboard < "$1"; else echo "No clipboard program found (pbcopy, wl-copy or xclip)." >&2; exit 1; fi';
+// The text is UTF-8, said so to each program: started from an app, pbcopy sees no UTF-8 locale
+// and reads the bytes as Mac Roman, so "ş" or "日" land on the clipboard garbled.
+const COPY = 'if command -v pbcopy >/dev/null; then LC_ALL=en_US.UTF-8 pbcopy < "$1"; elif command -v wl-copy >/dev/null; then wl-copy --type "text/plain;charset=utf-8" < "$1"; elif command -v xclip >/dev/null; then xclip -selection clipboard -target UTF8_STRING < "$1"; else echo "No clipboard program found (pbcopy, wl-copy or xclip)." >&2; exit 1; fi';
 
 // GitHub refuses a comment longer than this.
 export const MAX_COMMENT_CHARS = 65536;
