@@ -3,10 +3,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync, execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, rmSync, realpathSync, readdirSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, realpathSync, readdirSync, existsSync, readFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseHook, parseMeta, parseListing, sortTurns, resolveEnds, pickTurn, lastFinished, firstLine, ago, turnSource, hookSettings, LISTING, RECORD, FILE, QUIET, UNKNOWN } from "../mods/walkthrough/lib/turns.js";
+import { parseHook, parseMeta, parseListing, sortTurns, resolveEnds, pickTurn, keepTurn, lastFinished, autoWritable, firstLine, ago, turnSource, hookSettings, LISTING, RECORD, FILE, QUIET, UNKNOWN, HOOK_TIMEOUT, HOOK_WAIT } from "../mods/walkthrough/lib/turns.js";
 
 const SCRIPT = new URL("../mods/walkthrough/hooks/turn.sh", import.meta.url).pathname;
 const A = "a".repeat(40), B = "b".repeat(40), C = "c".repeat(40);
@@ -94,6 +94,42 @@ test("a turn no Stop hook ended: over at the terminal's next prompt, or once its
   assert.equal(turnSource(stale[0]).endTree, null);
 });
 
+test("turns with no session recorded aren't one session: each ends only at its own terminal's next prompt", () => {
+  const t = (id, started, terminal) => ({ id, dir: `/d/${id}`, started, ended: null, startTree: id.padEnd(40, "0"), endTree: null, session: null, terminal });
+  assert.deepEqual(resolveEnds([t("1", 1, "t1"), t("2", 2, "t2")], { now: 3 }).map((x) => [x.id, x.state]), [["2", "running"], ["1", "running"]]);
+  assert.deepEqual(resolveEnds([t("1", 1, "t1"), t("2", 2, "t1")], { now: 3 }).map((x) => [x.id, x.state]), [["2", "running"], ["1", "interrupted"]]);
+  assert.deepEqual(resolveEnds([t("1", 1, null), t("2", 2, null)], { now: 3 }).map((x) => x.state), ["running", "running"]);
+});
+
+test("a turn the walkthrough froze is written only on Generate; one its agent ended, without a click", () => {
+  const t = (state, frozen = false) => ({ id: "1", state, frozen });
+  assert.equal(autoWritable(t("done")), true);
+  assert.equal(autoWritable(t("interrupted")), true); // ended by the next prompt's snapshot
+  assert.equal(autoWritable(t("interrupted", true)), false);
+  assert.equal(autoWritable(t("running")), false);
+  assert.equal(autoWritable(t("stale")), false);
+  assert.equal(autoWritable(null), false);
+});
+
+test("waits on a Stop hook cover its timeout, and no more than that by much", () => {
+  assert.equal(JSON.parse(hookSettings("/x")).hooks.Stop[0].hooks[0].timeout, HOOK_TIMEOUT);
+  assert.ok(HOOK_WAIT > HOOK_TIMEOUT * 1000);
+  // A frozen end takes in what happened after the agent stopped: the sooner, the less.
+  assert.ok(QUIET <= HOOK_WAIT);
+});
+
+test("a turn picked by hand stays shown while it is listed; once it is gone, the picked one is shown and nothing is pinned", () => {
+  const turns = [{ id: "3", terminal: "t1" }, { id: "2", terminal: "t2" }, { id: "1", terminal: "t1" }];
+  assert.deepEqual(keepTurn(turns, { id: "1" }, true, "t2"), { turn: turns[2], pinned: true });
+  assert.deepEqual(keepTurn(turns, { id: "1" }, false, "t2"), { turn: turns[1], pinned: false });
+  const gone = keepTurn(turns, { id: "0" }, true, "t2");
+  assert.deepEqual(gone, { turn: turns[1], pinned: false });
+  // And a newer turn of the terminal is followed again.
+  const newer = [{ id: "4", terminal: "t2" }, ...turns];
+  assert.equal(keepTurn(newer, gone.turn, gone.pinned, "t2").turn.id, "4");
+  assert.deepEqual(keepTurn([], { id: "1" }, true), { turn: null, pinned: false });
+});
+
 test("newest first, ties by name", () => {
   assert.deepEqual(sortTurns([{ id: "1-1", started: 1 }, { id: "1-2", started: 1 }, { id: "0-9", started: 0 }]).map((t) => t.id), ["1-2", "1-1", "0-9"]);
 });
@@ -164,6 +200,55 @@ test("the script keeps a repository's newest 20 turns, each with its objects; th
   const turns = parseListing(execFileSync("sh", ["-c", LISTING, folder], { encoding: "utf8" }), folder);
   assert.equal(turns.length, 20);
   assert.ok(turns.every((t) => t.terminal === "t7" && t.session === "s" && /^turn \d+$/.test(t.prompt)));
+  rmSync(repo, { recursive: true, force: true });
+  rmSync(home, { recursive: true, force: true });
+});
+
+const metaOf = (dir) => parseMeta(existsSync(dir) ? readFileSync(dir, "utf8") : "");
+
+test("a Stop ends its session's newest turn again, but never an older one in place of a turn with no start snapshot", () => {
+  const repo = repository(), home = realpathSync(mkdtempSync(join(tmpdir(), "walkthrough-home-")));
+  const input = JSON.stringify({ session_id: "s", cwd: repo, prompt: "p" });
+  hook(home, "start", input);
+  writeFileSync(join(repo, "a.txt"), "b\n");
+  hook(home, "stop", input);
+  const folder = folderOf(home);
+  const [id] = readdirSync(folder).filter((n) => /^\d+-\d+$/.test(n));
+  const end = () => metaOf(join(folder, id, "end.meta")).tree;
+  const first = end();
+  // A stop hook kept the agent going: the same turn ends again, later.
+  writeFileSync(join(repo, "a.txt"), "c\n");
+  hook(home, "stop", input);
+  const second = end();
+  assert.notEqual(second, first);
+  // The next prompt's snapshot failed (or its hook's timeout cut it short): start.json, no start.meta.
+  const next = join(folder, `${id.split("-")[0]}-999999`);
+  mkdirSync(next);
+  writeFileSync(join(next, "start.json"), input);
+  writeFileSync(join(repo, "a.txt"), "d\n");
+  hook(home, "stop", input);
+  assert.equal(end(), second);
+  assert.equal(existsSync(join(next, "end.meta")), false);
+  rmSync(repo, { recursive: true, force: true });
+  rmSync(home, { recursive: true, force: true });
+});
+
+test("a new turn drops the indexes of ended turns and of its session's earlier ones, not another session's running turn's", () => {
+  const repo = repository(), home = realpathSync(mkdtempSync(join(tmpdir(), "walkthrough-home-")));
+  const input = (session) => JSON.stringify({ session_id: session, cwd: repo, prompt: session });
+  const indexes = () => {
+    const folder = folderOf(home);
+    return readdirSync(folder).filter((n) => /^\d+-\d+$/.test(n)).sort()
+      .map((n) => `${metaOf(join(folder, n, "start.meta")).session}:${existsSync(join(folder, n, "end.meta")) ? "ended" : "open"}:${existsSync(join(folder, n, "index")) ? "index" : "-"}`);
+  };
+  hook(home, "start", input("a"));
+  hook(home, "start", input("b"));
+  assert.deepEqual(indexes(), ["a:open:index", "b:open:index"]);
+  hook(home, "start", input("b")); // b's first turn was stopped with Esc
+  assert.deepEqual(indexes(), ["a:open:index", "b:open:-", "b:open:index"]);
+  hook(home, "stop", input("a"));
+  hook(home, "start", input("b"));
+  assert.deepEqual(indexes(), ["a:ended:-", "b:open:-", "b:open:-", "b:open:index"]);
   rmSync(repo, { recursive: true, force: true });
   rmSync(home, { recursive: true, force: true });
 });

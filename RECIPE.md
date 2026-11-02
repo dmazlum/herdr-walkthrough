@@ -184,18 +184,25 @@ A dialog 74% of the window wide and 80% tall (`modal`), on `theme().popover`; as
   Uncommitted; a finished one doesn't change with the working tree. A turn without
   `end.meta` ends at the next turn of its session or its terminal; the newest one stays
   running while its agent is `working` or `blocked`, and once it has been anything else
-  (or gone from `agents()`) for 2 minutes, or 12 hours with no terminal recorded, the mod
-  freezes it: a snapshot now, `end.meta` with `interrupted=1`. Open turns are listed again
+  (or gone from `agents()`) for 45 s (the hook timeout and 15 s), or 12 hours with no
+  terminal recorded, the mod freezes it: a snapshot now, `end.meta` with `interrupted=1`,
+  listed as "no Stop recorded, ended when seen idle". Turns with no session recorded are
+  not one session: such a turn ends only at its terminal's next prompt. Open turns are listed again
   every 15 s. New files over 1 MB in the end snapshot (`end.big`) and not in the start's
-  (`start.big`) are left out of the diff and listed "Not read: larger than 1 MB."
-- Picking a turn pins it, unless it is the one that would be picked anyway.
+  (`start.big`) are left out of the diff and listed "Not read: larger than 1 MB." A diff
+  that finds an object missing says which is gone: the turn's folder (only the newest 20
+  are kept), or, with the folder there, content the snapshot left to the repository's
+  objects that `git gc` removed.
+- Picking a turn pins it, unless it is the one that would be picked anyway. A pinned turn
+  no longer listed (20 newer ones came) unpins: the newest is followed again.
 - **Auto** (`autoGenerate` in the prefs: `on-open`, the default, or `off`): on open, the
   turn the tab shows, when finished and without a walkthrough by Haiku or by the picked
   model, is written with Haiku in the background (followed to its end even when another
   turn is picked meanwhile); in a pane (`props().overlay` unset), when an agent
   of this tab (`agents()`, `tab` the pane's) goes from `working` to `done` or `idle`, its
-  newest finished turn is, once its Stop hook has written `end.meta` (up to 20 s). Never
-  past 300 hunks or the prompt limit, and once per turn per open walkthrough. A finished
+  newest finished turn is, once its Stop hook has written `end.meta` (up to 45 s: the
+  hook's 30 s timeout and 15). Never a turn the mod froze (`interrupted=1`): its end may
+  hold the person's own edits, so it waits for Generate. Never past 300 hunks or the prompt limit, and once per turn per open walkthrough. A finished
   run posts `notify({ title: "Walkthrough ready", body: 'Last turn: "…"', level:
   "success" })`. `on-stop` (written with the walkthrough closed) is planned.
 - Model, language, scope, Auto and each repository's base are remembered in
@@ -273,17 +280,22 @@ writes the settings.
 `turn.sh start` (UserPromptSubmit) saves stdin unparsed as `start.json` in
 `turns/<repo>/<seconds>-<pid>/`, snapshots the working tree and writes `start.meta`
 (`tree=`, `started=`, `session=`, `terminal=$HC_TERMINAL_ID`) last; then keeps the
-newest 20 turns, removing older folders with their `objects/`, and drops the `index` of
-all but the newest. `turn.sh stop` (Stop) snapshots again into the session's newest turn
-(found by `session=`) and writes `end.json` and `end.meta` (`tree=`, `ended=`); a second
-Stop (a stop hook kept the agent going) ends it again, later. A snapshot: copy the
+newest 20 turns, removing older folders with their `objects/`. Before the snapshot it
+drops the `index` of every turn with an `end.meta` and of the session's earlier turns;
+another session's running turn keeps its own. A failed snapshot leaves `start.json`
+without `start.meta`. `turn.sh stop` (Stop) snapshots again into the session's newest turn
+(found by `session=` in `start.meta`, or `session_id` in `start.json`) and writes
+`end.json` and `end.meta` (`tree=`, `ended=`); a second Stop (a stop hook kept the agent
+going) ends it again, later. When that newest turn has no `start.meta`, Stop writes
+nothing: no older turn ends in its place. A snapshot: copy the
 repository's index (`git rev-parse --git-path index`, `cp -p`) to the turn's `index` once,
 then with `GIT_INDEX_FILE=<turn>/index GIT_OBJECT_DIRECTORY=<turn>/objects`, `git -c
 core.fsmonitor=false add -A -- . ':(exclude,literal)<each new file over 1 MB>'` and `git
 write-tree --missing-ok`, after `git update-index --force-remove` of those big files (one
 that was small when the turn began is in the turn's index already). The big files go to
 `start.big` / `end.big`, one per line. A copied index git can't use is deleted and the
-snapshot run again without it. It prints nothing and always exits 0.
+snapshot run again without it (the mod's own snapshot of a running turn does the same,
+without copying again). It prints nothing and always exits 0.
 
 ## Watch out
 
