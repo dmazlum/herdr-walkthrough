@@ -77,9 +77,14 @@ export function parseListing(out, folder) {
 /** Newest first, by when they started, then by name. */
 export const sortTurns = (turns) => [...turns].sort((a, b) => b.started - a.started || b.id.localeCompare(a.id));
 
+// How long Claude Code lets each hook run (hookSettings): a Stop hook has written end.meta by then, or never will.
+export const HOOK_TIMEOUT = 30;
+export const HOOK_WAIT = HOOK_TIMEOUT * 1000 + 15_000;
+
 // A turn without an end is taken as over once its agent has been quiet this long (or, with no
-// agent to ask, once it is this old): a Stop hook comes within seconds of the agent finishing.
-export const QUIET = 2 * 60_000;
+// agent to ask, once it is this old). Kept short: its end is frozen then, and edits made after
+// the agent stopped would be counted as the agent's.
+export const QUIET = HOOK_WAIT;
 export const UNKNOWN = 12 * 3600_000;
 
 /**
@@ -99,7 +104,7 @@ export function resolveEnds(turns, { idleSince = () => undefined, now = Date.now
   const sorted = sortTurns(turns);
   return sorted.map((t, i) => {
     if (t.endTree) return { ...t, endDir: t.dir, state: t.frozen ? "interrupted" : "done" };
-    const next = sorted.slice(0, i).reverse().find((n) => n.session === t.session || (t.terminal && n.terminal === t.terminal));
+    const next = sorted.slice(0, i).reverse().find((n) => (t.session && n.session === t.session) || (t.terminal && n.terminal === t.terminal));
     if (next) return { ...t, endTree: next.startTree, endDir: next.dir, endBig: next.startBig, ended: next.started, state: "interrupted" };
     const since = t.terminal ? idleSince(t.terminal) : undefined;
     const over = typeof since === "number" ? now - Math.max(since, t.started) > QUIET : since === undefined && now - t.started > UNKNOWN;
@@ -109,6 +114,24 @@ export function resolveEnds(turns, { idleSince = () => undefined, now = Date.now
 
 /** Whether a turn is still open: read up to now, never written up without a click. */
 export const isOpen = (t) => t.state === "running" || t.state === "stale";
+
+/**
+ * Whether a turn's walkthrough may be written without a click: finished, and
+ * ended by its agent. A turn the walkthrough froze (no Stop hook came) ends
+ * when the walkthrough noticed, so it may hold edits made after the agent
+ * stopped; it is written only on Generate.
+ */
+export const autoWritable = (t) => Boolean(t) && !isOpen(t) && !t.frozen;
+
+/**
+ * The turn to show after listing again: the one picked by hand while it is
+ * still listed, else the one pickTurn picks (and it no longer counts as picked).
+ * @returns {{ turn: any, pinned: boolean }}
+ */
+export function keepTurn(turns, shown, pinned, terminal = null) {
+  const kept = pinned && shown ? turns.find((t) => t.id === shown.id) : null;
+  return kept ? { turn: kept, pinned: true } : { turn: pickTurn(turns, terminal), pinned: false };
+}
 
 /** The turn to show first: the newest of the terminal it was opened over, else the newest. */
 export function pickTurn(turns, terminal = null) {
@@ -154,6 +177,6 @@ exit 0`;
 
 /** The hooks to add to ~/.claude/settings.json, for a turn.sh at `script`. */
 export function hookSettings(script) {
-  const hook = (event) => [{ hooks: [{ type: "command", command: `sh "${script}" ${event}`, timeout: 30 }] }];
+  const hook = (event) => [{ hooks: [{ type: "command", command: `sh "${script}" ${event}`, timeout: HOOK_TIMEOUT }] }];
   return JSON.stringify({ hooks: { UserPromptSubmit: hook("start"), Stop: hook("stop") } }, null, 2);
 }

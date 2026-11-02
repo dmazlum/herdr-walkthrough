@@ -16,7 +16,7 @@ import { toMarkdown } from "./lib/export.js";
 import { readKey, hunkRead, isRead, markStep, unmarkStep, mergeRead, changedSince } from "./lib/read.js";
 import { readDiff, readPreferences, matters, keyFor, findShown, preparePrompt, fits, promptChars, jobOf, startJob, alive, finished, cancelJob, finishJob, copyText, postComment, claudeVersion, systemLocale, ensureDirs, loadRead, saveRead } from "./engine.js";
 import { button, chip, menu, picker, formatElapsed, formatTokens } from "./ui.js";
-import { turnSource } from "./lib/turns.js";
+import { turnSource, isOpen } from "./lib/turns.js";
 import { AUTO, DEFAULT_AUTO, autoOf, startTurns, loadTurns, turnLabel, turnItems, chooseTurn, turnTick, autoGenerate, announce, hookHelp } from "./turnview.js";
 
 const PREFS = "walkthrough.prefs";
@@ -243,7 +243,7 @@ export class Walkthrough {
       for (;;) {
         const changed = await watchFolder(folder);
         // A commit, a pull request or a finished turn doesn't change with the working tree.
-        if (this.scope !== "commit" && this.scope !== "pr" && !(this.scope === "turn" && this.turn?.state !== "running") && !this.dirty && await matters(top, changed, gitDir)) this.dirty = true;
+        if (this.scope !== "commit" && this.scope !== "pr" && !(this.scope === "turn" && !(this.turn && isOpen(this.turn))) && !this.dirty && await matters(top, changed, gitDir)) this.dirty = true;
       }
     });
     loop(top);
@@ -694,7 +694,7 @@ export class Walkthrough {
     if (this.scope === "turn" && !this.turns.length) return hookHelp(this, t);
     if (!this.source()) return center(this.scope === "branch" ? "Pick the branch to compare with." : this.scope === "pr" ? "Pick a pull request." : "Pick a commit.", "Nothing is read or generated until you do.");
     if (!this.diff) return center("Reading the diff…");
-    if (!this.diff.files.length) return center("Nothing to walk through.", this.scope === "turn" ? (this.turn?.state === "running" ? "This turn hasn't changed any files yet." : "This turn changed no files.") : `No ${SCOPES.find((s) => s.key === this.scope)?.label.toLowerCase()} changes${this.scope === "branch" ? ` against ${this.base}` : ""}.`);
+    if (!this.diff.files.length) return center("Nothing to walk through.", this.scope === "turn" ? (this.turn && isOpen(this.turn) ? "This turn hasn't changed any files yet." : "This turn changed no files.") : `No ${SCOPES.find((s) => s.key === this.scope)?.label.toLowerCase()} changes${this.scope === "branch" ? ` against ${this.base}` : ""}.`);
     if (!this.view) return this.job ? this.progress(t) : this.intro(t);
     // A narrow pane gives the page the room; the footer still moves between steps.
     return h_flex().size_full().items_start()

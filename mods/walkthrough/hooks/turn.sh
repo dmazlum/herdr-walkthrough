@@ -10,7 +10,7 @@
 #   start.meta, end.meta   tree=<snapshot>, when, session, terminal (written last)
 #   start.big, end.big     the new files over 1 MB each snapshot left out, one per line
 #   objects/               the blobs and trees of content the index didn't already name
-#   index                  the snapshot's own index (only the newest turn keeps it)
+#   index                  the snapshot's own index (dropped once the turn is over)
 #
 # A snapshot is `git add -A && git write-tree --missing-ok` against an index
 # (a copy of the repository's) and an object folder of its own. The
@@ -97,11 +97,15 @@ main() {
     turn="$repo/$now-$(printf '%06d' $$)"
     mkdir -p "$turn/objects" || return 0
     mv "$input" "$turn/start.json"
-    # Only the newest turn snapshots again; the others' indexes are dead weight.
+    # An ended turn's index, or one of this session's earlier turns', is dead weight; another session's running turn still needs its own.
     for old in $(turns); do
-      [ "$repo/$old" != "$turn" ] && rm -f "$repo/$old/index"
+      [ "$repo/$old" = "$turn" ] && continue
+      if [ -f "$repo/$old/end.meta" ] || { [ -n "$session" ] && grep -qx "session=$session" "$repo/$old/start.meta"; }; then
+        rm -f "$repo/$old/index"
+      fi
     done
-    tree=$(snapshot "$turn" "$turn/index" "$turn/start.big") || { rm -rf "$turn"; return 0; }
+    # A failed snapshot leaves start.json without start.meta: this turn's Stop then finds it, and ends no older turn in its place.
+    tree=$(snapshot "$turn" "$turn/index" "$turn/start.big") || { rm -rf "$turn/objects" "$turn/index"; return 0; }
     put "$turn/start.meta" "tree=$tree
 started=$now
 session=$session
@@ -112,16 +116,17 @@ terminal=${HC_TERMINAL_ID:-}
     return 0
   fi
 
-  # Stop: the session's newest turn. Ended already when a stop hook kept the agent going; then it ends again, later.
+  # Stop: the session's newest turn, known by the start.json its start saved first. Ended already when a stop hook
+  # kept the agent going; then it ends again, later. Without a start snapshot (still being taken, failed, or cut
+  # short by the hook's timeout) nothing is written: an older turn of the session is over, and stays as it ended.
   turn=
   for name in $(turns); do
-    [ -f "$repo/$name/start.meta" ] || continue
-    if [ -z "$session" ] || grep -qx "session=$session" "$repo/$name/start.meta"; then
+    if [ -z "$session" ] || grep -qx "session=$session" "$repo/$name/start.meta" || [ "$(field session_id "$repo/$name/start.json")" = "$session" ]; then
       turn="$repo/$name"
       break
     fi
   done
-  [ -n "$turn" ] || return 0
+  [ -n "$turn" ] && [ -f "$turn/start.meta" ] || return 0
   tree=$(snapshot "$turn" "$turn/index" "$turn/end.big") || return 0
   mv "$input" "$turn/end.json"
   put "$turn/end.meta" "tree=$tree

@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { repoAt, currentHead, loadSections, defaultBase, baseChoices, recentCommits, sourceKey, describe, MAX_UNTRACKED_BYTES, pullRequests, ghError, turnsKey } from "../mods/walkthrough/lib/sources.js";
 import { buildDigest } from "../mods/walkthrough/lib/digest.js";
 import { jobScript, readOutcome } from "../mods/walkthrough/lib/job.js";
-import { chmodSync, readFileSync, existsSync } from "node:fs";
+import { chmodSync, readFileSync, existsSync, utimesSync } from "node:fs";
 
 const exec = (cmd, args, { cwd } = {}) => new Promise((resolve) => execFile(cmd, args, { cwd, maxBuffer: 1 << 26 },
   (e, stdout, stderr) => resolve({ code: e ? (typeof e.code === "number" ? e.code : 1) : 0, stdout, stderr })));
@@ -377,5 +377,39 @@ test("a copied index git can't use (split, or broken): the hook and the mod's ow
   writeFileSync(join(running.dir, "index"), "not an index");
   r.hook("stop");
   assert.deepEqual((await r.files(r.turns()[0])).files, ["a.txt:modified", "n.txt:added"]);
+  r.done();
+});
+
+test("when every copy of the repository's index is one git can't use, the mod's own snapshot starts over without one, as the hook does", async () => {
+  const r = await turnRepo();
+  r.hook("start");
+  writeFileSync(join(r.repo, "a.txt"), "changed\n");
+  writeFileSync(join(r.repo, "n.txt"), "new\n");
+  const [running] = r.turns();
+  // Each copy (`cp -p <real> <index>`) comes out unreadable.
+  const broken = (cmd, args, opts) => cmd === "sh" && /cp -p/.test(args[1]) ? exec("sh", ["-c", 'printf "not an index" > "$0"', args[3]], opts) : exec(cmd, args, opts);
+  const { sections } = await loadSections(broken, r.repo, turnSource(running));
+  assert.deepEqual(buildDigest(sections).files.map((f) => `${f.path}:${f.status}`), ["a.txt:modified", "n.txt:added"]);
+  r.done();
+});
+
+test("a turn that can't be read says why: its folder was dropped, or git gc removed what its snapshots left to the repository", async () => {
+  const r = await turnRepo();
+  // Staged, never committed: the snapshot names the repository's object for it and keeps no copy.
+  writeFileSync(join(r.repo, "staged.txt"), "staged\n");
+  utimesSync(join(r.repo, "staged.txt"), 1, 1); // older than the index, or git hashes it again (racy git) and the turn keeps a copy
+  await sh(r.repo, "add", "staged.txt");
+  const blob = await sh(r.repo, "rev-parse", ":staged.txt");
+  r.hook("start");
+  writeFileSync(join(r.repo, "staged.txt"), "changed in the turn\n");
+  r.hook("stop");
+  const [turn] = r.turns();
+  assert.deepEqual((await r.files(turn)).files, ["staged.txt:modified"]);
+  // Unstaged, then pruned, as `git gc` would once nothing names it.
+  await sh(r.repo, "reset", "-q", "--", "staged.txt");
+  rmSync(join(r.repo, ".git/objects", blob.slice(0, 2), blob.slice(2)));
+  await assert.rejects(r.files(turn), /git gc has removed/);
+  rmSync(turn.dir, { recursive: true, force: true });
+  await assert.rejects(r.files(turn), /only the newest 20 turns are kept/);
   r.done();
 });
