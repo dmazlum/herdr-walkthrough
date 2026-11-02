@@ -56,8 +56,8 @@ export function menu(t, id, items, onPick, { width = 280, active = -1, scroll = 
 }
 
 /** A dropdown's face: its label and a caret. */
-export function picker(t, id, label, onClick, { disabled = false, tooltip = null } = {}) {
-  return button(t, id, h_flex().gap(5).items_center().child(div().max_w(220).truncate().child(label)).child(div().text_color(t.dim).text_size(9).child("▼")), onClick, { small: true, disabled, tooltip });
+export function picker(t, id, label, onClick, { disabled = false, tooltip = null, kind = "outline" } = {}) {
+  return button(t, id, h_flex().gap(5).items_center().child(div().max_w(220).truncate().child(label)).child(div().text_color(t.dim).text_size(9).child("▼")), onClick, { small: true, disabled, tooltip, kind });
 }
 
 export const formatElapsed = (ms) => {

@@ -94,6 +94,9 @@ main() {
   now=$(date +%s)
 
   if [ "$event" = start ]; then
+    # A background task's notification comes as a prompt too; it starts no turn. Mid-turn, the
+    # turn goes on; after it, the next Stop ends the session's last turn again, with this work in it.
+    grep -q '"prompt"[[:space:]]*:[[:space:]]*"<task-notification>' "$input" && return 0
     turn="$repo/$now-$(printf '%06d' $$)"
     mkdir -p "$turn/objects" || return 0
     mv "$input" "$turn/start.json"

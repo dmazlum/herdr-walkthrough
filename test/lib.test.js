@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { hash, shortHash, longHash } from "../mods/walkthrough/lib/hash.js";
-import { parseDiff, headerPath, unquote, numberLines, indexHunks } from "../mods/walkthrough/lib/hunks.js";
+import { parseDiff, headerPath, unquote, numberLines, indexHunks, hunkLabel, numberDigits } from "../mods/walkthrough/lib/hunks.js";
 import { isGenerated } from "../mods/walkthrough/lib/generated.js";
 import { buildDigest } from "../mods/walkthrough/lib/digest.js";
 import { buildPrompt, sizing } from "../mods/walkthrough/lib/prompt.js";
@@ -354,4 +354,20 @@ test("comments: one per line, formatted with their code", () => {
   assert.equal(list.length, 2);
   assert.equal(formatComments(list, "uncommitted changes"),
     "Comments from reading the walkthrough of uncommitted changes\n- a.js:3 `x = 1;`: why one?\n- a.js:3 (removed line) `x = 0;`: was fine");
+});
+
+test("a hunk's header in words: where it starts, what was skipped, and the function it sits in", () => {
+  const [file] = parseDiff([
+    "diff --git a/s.js b/s.js", "--- a/s.js", "+++ b/s.js",
+    "@@ -12,3 +12,4 @@ export class Store {", " a", "-b", "+B", "+C", " d",
+    "@@ -40,2 +44,3 @@ export class Store {", " x", "+y", " z",
+    "@@ -90,2 +95,0 @@", "-gone", "-too",
+  ].join("\n") + "\n");
+  const [a, b, c] = file.hunks;
+  assert.deepEqual(hunkLabel(a), { at: "Line 12", skipped: null, context: "export class Store {" });
+  assert.deepEqual(hunkLabel(b, a), { at: "Line 44", skipped: 28, context: "export class Store {" });
+  // Nothing left of it in the new file: where it was in the old one.
+  assert.deepEqual(hunkLabel(c, b), { at: "Line 90", skipped: 48, context: "" });
+  assert.equal(numberDigits(file.hunks), 2);
+  assert.equal(numberDigits([{ oldStart: 990, oldLines: 20, newStart: 1, newLines: 1 }]), 4);
 });
