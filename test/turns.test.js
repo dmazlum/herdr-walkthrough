@@ -6,7 +6,7 @@ import { spawnSync, execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync, realpathSync, readdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseHook, parseMeta, parseListing, sortTurns, resolveEnds, pickTurn, lastFinished, firstLine, ago, turnSource, hookSettings, LISTING, RECORD, FILE } from "../mods/walkthrough/lib/turns.js";
+import { parseHook, parseMeta, parseListing, sortTurns, resolveEnds, pickTurn, lastFinished, firstLine, ago, turnSource, hookSettings, LISTING, RECORD, FILE, QUIET, UNKNOWN } from "../mods/walkthrough/lib/turns.js";
 
 const SCRIPT = new URL("../mods/walkthrough/hooks/turn.sh", import.meta.url).pathname;
 const A = "a".repeat(40), B = "b".repeat(40), C = "c".repeat(40);
@@ -29,8 +29,8 @@ test("meta lines", () => {
   assert.deepEqual(parseMeta("tree=abc\nstarted=12\nsession=\nterminal=t3\n"), { tree: "abc", started: "12", session: "", terminal: "t3" });
 });
 
-const listing = (turns) => turns.map(({ id, start, end, json }) => `${RECORD}${id}\n`
-  + (start ? `${FILE}start.meta\n${start}` : "") + (end ? `${FILE}end.meta\n${end}` : "") + (json ? `${FILE}start.json\n${json}` : "")).join("");
+const listing = (turns) => turns.map(({ id, start, end, json, big }) => `${RECORD}${id}\n`
+  + (start ? `${FILE}start.meta\n${start}` : "") + (end ? `${FILE}end.meta\n${end}` : "") + (big ? `${FILE}end.big\n${big}` : "") + (json ? `${FILE}start.json\n${json}` : "")).join("");
 
 test("a listing → turns, newest first, an unfinished start snapshot left out", () => {
   const out = listing([
@@ -41,14 +41,20 @@ test("a listing → turns, newest first, an unfinished start snapshot left out",
   ]);
   const turns = parseListing(out, "/turns/r");
   assert.deepEqual(turns.map((t) => t.id), ["200-000002", "100-000001"]);
-  assert.deepEqual(turns[1], { id: "100-000001", dir: "/turns/r/100-000001", started: 100_000, ended: 130_000, startTree: A, endTree: B, session: "s", terminal: "t1", prompt: "first" });
+  assert.deepEqual(turns[1], { id: "100-000001", dir: "/turns/r/100-000001", started: 100_000, ended: 130_000, startTree: A, endTree: B, frozen: false,
+    startBig: [], endBig: [], session: "s", terminal: "t1", prompt: "first" });
   assert.equal(turns[0].endTree, null);
   assert.equal(turns[0].terminal, null);
+  // An end the walkthrough froze, and the big files a snapshot left out.
+  const [frozen] = parseListing(listing([{ id: "1-1", start: `tree=${A}\nstarted=1\n`, end: `tree=${B}\nended=2\ninterrupted=1\n`, big: "big.log\nsub/x.bin\n" }]), "/t");
+  assert.equal(frozen.frozen, true);
+  assert.deepEqual(frozen.endBig, ["big.log", "sub/x.bin"]);
+  assert.equal(resolveEnds([frozen])[0].state, "interrupted");
 });
 
 test("where turns end: done, interrupted (the session went on), running", () => {
   const t = (id, started, session, endTree = null) => ({ id, dir: `/d/${id}`, started, ended: endTree ? started + 5 : null, startTree: `${id}`.padEnd(40, "0"), endTree, session, terminal: session === "s1" ? "t1" : "t2" });
-  const turns = resolveEnds([t("1", 1, "s1", A), t("2", 2, "s1"), t("3", 3, "s2"), t("4", 4, "s1")]);
+  const turns = resolveEnds([t("1", 1, "s1", A), t("2", 2, "s1"), t("3", 3, "s2"), t("4", 4, "s1")], { now: 5 });
   assert.deepEqual(turns.map((x) => [x.id, x.state]), [["4", "running"], ["3", "running"], ["2", "interrupted"], ["1", "done"]]);
   const interrupted = turns.find((x) => x.id === "2");
   assert.equal(interrupted.endTree, turns[0].startTree);
@@ -56,13 +62,36 @@ test("where turns end: done, interrupted (the session went on), running", () => 
   assert.equal(interrupted.ended, 4);
   // A running turn is read up to now; the others against their end, in the end's folder.
   assert.equal(turnSource(turns[0]).endTree, null);
-  assert.deepEqual(turnSource(interrupted), { kind: "turn", id: "2", dir: "/d/2", startTree: interrupted.startTree, endTree: turns[0].startTree, endDir: "/d/4", prompt: undefined });
+  assert.deepEqual(turnSource(interrupted), { kind: "turn", id: "2", dir: "/d/2", startTree: interrupted.startTree, endTree: turns[0].startTree, endDir: "/d/4",
+    startBig: [], endBig: [], prompt: undefined });
+  assert.equal(turnSource(turns[0]).endBig, null);
   assert.equal(pickTurn(turns, "t2").id, "3");
   assert.equal(pickTurn(turns, "t9").id, "4");
   assert.equal(pickTurn([], "t1"), null);
   assert.equal(lastFinished(turns), null);
   assert.equal(lastFinished(turns.slice(2)).id, "2");
   assert.equal(lastFinished(turns, ["t2"]), null);
+});
+
+test("a turn no Stop hook ended: over at the terminal's next prompt, or once its agent is quiet", () => {
+  const t = (id, started, session, terminal) => ({ id, dir: `/d/${id}`, started, ended: null, startTree: id.padEnd(40, "0"), endTree: null, startBig: [id], session, terminal });
+  const now = 10 * UNKNOWN;
+  // /clear started a new session in the same terminal: the old session's turn ended there.
+  const cleared = resolveEnds([t("1", now - 5000, "s1", "t1"), t("2", now - 1000, "s2", "t1")], { now });
+  assert.deepEqual(cleared.map((x) => x.state), ["running", "interrupted"]);
+  assert.deepEqual(cleared[1].endBig, ["2"]);
+  const one = [t("1", now - QUIET * 3, "s1", "t1")];
+  assert.equal(resolveEnds(one, { now, idleSince: () => null })[0].state, "running"); // working
+  assert.equal(resolveEnds(one, { now, idleSince: () => now - QUIET / 2 })[0].state, "running"); // just stopped: a Stop hook may still come
+  assert.equal(resolveEnds(one, { now, idleSince: () => now - QUIET * 2 })[0].state, "stale");
+  // Quiet since before it began counts from its start.
+  assert.equal(resolveEnds([t("1", now - 1000, "s1", "t1")], { now, idleSince: () => now - QUIET * 9 })[0].state, "running");
+  // No agent to ask (recorded outside Herdr): over only when old.
+  assert.equal(resolveEnds([t("1", now - 1000, "s1", null)], { now })[0].state, "running");
+  assert.equal(resolveEnds([t("1", now - UNKNOWN - 1, "s1", null)], { now })[0].state, "stale");
+  const stale = resolveEnds(one, { now, idleSince: () => 0 });
+  assert.equal(lastFinished(stale), null);
+  assert.equal(turnSource(stale[0]).endTree, null);
 });
 
 test("newest first, ties by name", () => {

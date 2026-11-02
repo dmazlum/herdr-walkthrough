@@ -150,24 +150,55 @@ async function stamps(exec, top, paths) {
  * The repository's objects are kept out of sight (git would update the time of
  * any it found again), so the tree may name blobs only the repository has:
  * a turn is always read with both. New files over 1 MB are left out, as a diff
- * leaves them unread.
- * @returns {Promise<string>} the tree's hash
+ * leaves them unread, and named in `big`.
+ * @returns {Promise<{ tree: string, big: string[] }>}
  */
 export async function snapshotTree(exec, top, { index, objects }) {
   const real = (await must(exec, top, ["rev-parse", "--path-format=absolute", "--git-path", "index"])).trim();
-  // The repository's own index, copied once: its file stats spare re-reading every unchanged file.
-  await exec("sh", ["-c", '[ -f "$1" ] || [ ! -f "$0" ] || cp -p "$0" "$1"', real, index]);
-  const paths = (await must(exec, top, ["ls-files", "--others", "--exclude-standard", "-z"])).split("\0").filter(Boolean);
-  const big = paths.length ? (await stamps(exec, top, paths)).filter((s) => s.size > MAX_UNTRACKED_BYTES).map((s) => `:(exclude,literal)${s.path}`) : [];
+  const big = await largeUntracked(exec, top);
   const env = [`GIT_INDEX_FILE=${index}`, `GIT_OBJECT_DIRECTORY=${objects}`];
   const run = async (args) => {
     const r = await exec("env", [...env, "git", "-c", "core.fsmonitor=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false", ...args], { cwd: top });
     if (r.code !== 0) throw new Error((r.stderr || `git ${args[0]} failed`).trim());
     return (r.stdout ?? "").trim();
   };
+  const snap = async () => {
+    // The repository's own index, copied once: its file stats spare re-reading every unchanged file.
+    await exec("sh", ["-c", '[ -f "$1" ] || [ ! -f "$0" ] || cp -p "$0" "$1"', real, index]);
+    // A file small when the turn began is in this index already: out with it too, or its old content stays.
+    if (big.length) await run(["update-index", "--force-remove", "--", ...big]);
+    await run(["add", "-A", "--", ".", ...big.map((p) => `:(exclude,literal)${p}`)]);
+    return run(["write-tree", "--missing-ok"]);
+  };
   await exec("mkdir", ["-p", objects]);
-  await run(["add", "-A", "--", ".", ...big]);
-  return run(["write-tree", "--missing-ok"]);
+  let tree;
+  try { tree = await snap(); } catch {
+    // A copied index git can't use here (a split index, say) is dropped, and the snapshot starts over without it.
+    await exec("rm", ["-f", index]);
+    tree = await snap().catch(async (e) => { await exec("rm", ["-f", index]); throw e; });
+  }
+  return { tree, big };
+}
+
+/**
+ * New files over 1 MB, found by `find -size` in batches (xargs): no argument
+ * list grows with the number of new files, and no process runs per file.
+ */
+async function largeUntracked(exec, top) {
+  const script = `git ${READ.join(" ")} ls-files --others --exclude-standard -z | xargs -0 sh -c '[ $# -gt 0 ] && find "$@" -prune -type f -size +${MAX_UNTRACKED_BYTES}c' sh; exit 0`;
+  const r = await exec("sh", ["-c", script], { cwd: top });
+  return (r.stdout ?? "").split("\n").filter(Boolean);
+}
+
+/**
+ * The name of a repository's turns folder, as hooks/turn.sh makes it: the
+ * first 16 digits of git's hash of its path, hashed inside the repository so
+ * a SHA-256 one names it the same way the hook does.
+ */
+export async function turnsKey(exec, top) {
+  const r = await exec("sh", ["-c", 'printf %s "$0" | git hash-object --stdin', top], { cwd: top });
+  const key = (r.stdout ?? "").trim().slice(0, 16);
+  return r.code === 0 && /^[0-9a-f]{16}$/.test(key) ? key : null;
 }
 
 /**
@@ -239,9 +270,14 @@ export async function loadSections(exec, top, source) {
       break;
     case "turn": {
       // The snapshots' objects live in the turns' own folders; git reads them as alternates beside the repository's.
-      const end = source.endTree ?? await snapshotTree(exec, top, { index: `${source.dir}/now.index`, objects: `${source.dir}/objects` });
+      let end = source.endTree, big = source.endBig ?? [];
+      if (!end) ({ tree: end, big } = await snapshotTree(exec, top, { index: `${source.dir}/now.index`, objects: `${source.dir}/objects` }));
       const objects = [...new Set([source.dir, source.endDir ?? source.dir])].map((d) => `${d}/objects`).join(":");
-      const r = await exec("env", [`GIT_ALTERNATE_OBJECT_DIRECTORIES=${objects}`, "git", ...READ, "diff", ...DIFF, source.startTree, end], { cwd: top });
+      // A new file over 1 MB at the end is listed unread, as in every scope; one that was big at the start too is no news.
+      const left = big.map((p) => `:(exclude,literal)${p}`);
+      const r = await exec("env", [`GIT_ALTERNATE_OBJECT_DIRECTORIES=${objects}`, "git", ...READ, "diff", ...DIFF, source.startTree, end, ...(left.length ? ["--", ".", ...left] : [])], { cwd: top });
+      const before = new Set(source.startBig ?? []);
+      unread = big.filter((p) => !before.has(p)).map((path) => ({ path, why: "Not read: larger than 1 MB." }));
       if (r.code !== 0) throw new Error(/bad object|not a tree|could not read/i.test(r.stderr ?? "") ? "This turn's snapshots are gone: only the newest 20 turns are kept." : (r.stderr || "git diff failed").trim());
       add("turn", r.stdout ?? "");
       break;

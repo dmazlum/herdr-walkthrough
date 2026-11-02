@@ -139,7 +139,7 @@ export class Walkthrough {
       await startTurns(this, cx);
       await this.reload(cx);
       this.watch(cx);
-      await autoGenerate(this, cx, this.turns.find((x) => x.state !== "running"));
+      await autoGenerate(this, cx, this.turn); // the turn the tab shows: this terminal's newest, else the newest
     });
     cx.timer.every(1000, (cx) => this.tick(cx));
     // Commands for keys.json: walkthrough.generate, .cancel, .next, .prev, .copy.
@@ -288,7 +288,7 @@ export class Walkthrough {
         try {
           // null: another window took the answer; it is stored in a moment, and a later read finds it.
           lost = (await finishJob(job)) === null;
-          if (!lost && job.meta.auto) announce(this.turn);
+          if (!lost && job.meta.auto) announce(job.meta.source);
           this.genError = null;
         } catch (e) { this.genError = String(e?.message ?? e); }
         await this.reload(cx);
@@ -391,6 +391,7 @@ export class Walkthrough {
 
   choose(kind, value, cx) {
     this.picking = null;
+    if (kind === "auto") { this.auto = value; savePrefs({ autoGenerate: value }); cx.notify(); return; }
     if (kind !== "agent") { this.genError = null; this.loading = true; }
     if (kind === "model") { this.model = value; savePrefs({ model: value }); }
     if (kind === "language") { this.language = value; savePrefs({ language: value }); }
@@ -398,7 +399,6 @@ export class Walkthrough {
     if (kind === "commit") this.commit = value;
     if (kind === "pr") { this.pr = value; this.confirmPost = false; }
     if (kind === "turn") chooseTurn(this, value);
-    if (kind === "auto") { this.auto = value; this.loading = false; savePrefs({ autoGenerate: value }); cx.notify(); return; }
     if (kind === "agent") { this.agentTo = value; cx.notify(); return; }
     cx.spawn(async (cx) => this.reload(cx));
   }

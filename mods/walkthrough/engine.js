@@ -8,7 +8,7 @@
 //   preferences.md         optional: the reader's own wishes, added to every prompt
 
 import { exec, home, appHome, readTextFile, writeTextFile } from "herdr";
-import { loadSections, sourceKey, describe, git, worthReading, ghError } from "./lib/sources.js";
+import { loadSections, sourceKey, describe, git, worthReading, ghError, turnsKey, snapshotTree } from "./lib/sources.js";
 import { buildDigest } from "./lib/digest.js";
 import { buildPrompt } from "./lib/prompt.js";
 import { SCHEMA, normalize, VERSION } from "./lib/walkthrough.js";
@@ -152,24 +152,31 @@ export const hasEntry = async (key) => (await readJson(entryPath(key)))?.version
 /** Where the installed hook script is, for the settings snippet: the mod's own folder. */
 export const hookScript = () => `${appHome()}/mods/walkthrough/hooks/turn.sh`;
 
-/**
- * A repository's turns folder, named as hooks/turn.sh names it: the first 16
- * digits of git's hash of the path. Made here so it can be watched before the first turn.
- */
+/** A repository's turns folder, named as hooks/turn.sh names it. Made here so it can be watched before the first turn. */
 export async function turnsFolder(top) {
-  const r = await exec("sh", ["-c", 'printf %s "$0" | git hash-object --stdin', top]);
-  const key = (r.stdout ?? "").trim().slice(0, 16);
-  if (r.code !== 0 || !/^[0-9a-f]{16}$/.test(key)) return null;
+  const key = await turnsKey(exec, top);
+  if (!key) return null;
   const dir = `${dataDir()}/turns/${key}`;
   await exec("mkdir", ["-p", dir]).catch(() => undefined);
   return dir;
 }
 
-/** A repository's turns, newest first, each with where it ended (lib/turns.js). */
-export async function listTurns(folder) {
+/** A repository's turns, newest first, each with where it ended (lib/turns.js; `ends`: resolveEnds' options). */
+export async function listTurns(folder, ends = {}) {
   if (!folder) return [];
   const r = await exec("sh", ["-c", LISTING, folder]).catch(() => null);
-  return resolveEnds(parseListing(r?.stdout ?? "", folder));
+  return resolveEnds(parseListing(r?.stdout ?? "", folder), ends);
+}
+
+/**
+ * Ends a turn no Stop hook ended and whose agent has gone quiet (it was quit,
+ * or stopped and left): its end is the working tree now, marked interrupted,
+ * so it stops following later edits. A Stop hook arriving after all ends it again.
+ */
+export async function closeTurn(top, turn) {
+  const { tree, big } = await snapshotTree(exec, top, { index: `${turn.dir}/now.index`, objects: `${turn.dir}/objects` });
+  await write(`${turn.dir}/end.big`, big.map((p) => `${p}\n`).join(""));
+  await write(`${turn.dir}/end.meta`, `tree=${tree}\nended=${Math.floor(Date.now() / 1000)}\ninterrupted=1\n`);
 }
 
 /** The prompt that would be sent, to size it before anything is spent. */

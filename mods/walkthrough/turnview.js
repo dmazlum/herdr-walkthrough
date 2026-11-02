@@ -5,8 +5,8 @@
 import { div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { agents, notify, settings, watchFolder } from "herdr";
-import { turnSource, pickTurn, lastFinished, firstLine, ago, hookSettings } from "./lib/turns.js";
-import { turnsFolder, listTurns, readDiff, readPreferences, keyFor, hasEntry, jobOf, preparePrompt, fits, startJob, finished, finishJob, copyText, hookScript } from "./engine.js";
+import { turnSource, pickTurn, lastFinished, isOpen, firstLine, ago, hookSettings } from "./lib/turns.js";
+import { turnsFolder, listTurns, closeTurn, readDiff, readPreferences, keyFor, hasEntry, jobOf, preparePrompt, fits, startJob, finished, finishJob, copyText, hookScript } from "./engine.js";
 import { button, formatElapsed } from "./ui.js";
 
 // Written without a click only by the cheapest model, and only for a change small enough to be cheap.
@@ -39,7 +39,15 @@ export async function startTurns(v, cx) {
  */
 export async function loadTurns(v) {
   v.turnsDirty = false;
-  const turns = await listTurns(v.turnsDir);
+  v.turnsRead = Date.now();
+  const ends = { idleSince: (terminal) => idleSince(v, terminal) };
+  let turns = await listTurns(v.turnsDir, ends);
+  // A turn no Stop hook ended, whose agent has gone quiet, stops following the working tree here.
+  const stale = turns.filter((t) => t.state === "stale");
+  if (stale.length && v.repo) {
+    for (const t of stale) await closeTurn(v.repo.top, t).catch(() => undefined);
+    turns = await listTurns(v.turnsDir, ends);
+  }
   const before = v.turn;
   v.turns = turns;
   v.turn = (v.turnPinned && turns.find((t) => t.id === before?.id)) || pickTurn(turns, v.from);
@@ -47,11 +55,25 @@ export async function loadTurns(v) {
   return before?.id !== v.turn?.id || before?.state !== v.turn?.state || before?.endTree !== v.turn?.endTree;
 }
 
+/**
+ * Since when the agent in a terminal has not been working: null while it
+ * works or waits on the person, the time it was first seen otherwise (gone
+ * from agents() counts: it was quit).
+ */
+function idleSince(v, terminal) {
+  v.idle ??= new Map();
+  const a = agents().find((x) => x.address === terminal);
+  if (a && (a.status === "working" || a.status === "blocked")) { v.idle.delete(terminal); return null; }
+  if (!v.idle.has(terminal)) v.idle.set(terminal, Date.now());
+  return v.idle.get(terminal);
+}
+
 /** The toolbar's turn dropdown face. */
 export const turnLabel = (v) => (v.turn ? firstLine(v.turn.prompt, 48) || "(empty prompt)" : "Pick a turn");
 
 function stateOf(t) {
   if (t.state === "running") return "still running";
+  if (t.state === "stale") return "no end recorded";
   if (t.state === "interrupted") return "interrupted";
   return t.ended ? `took ${formatElapsed(t.ended - t.started)}` : "finished";
 }
@@ -59,14 +81,14 @@ function stateOf(t) {
 export const turnItems = (v) => v.turns.map((t) => ({
   label: firstLine(t.prompt, 72) || "(empty prompt)",
   hint: [ago(t.started), stateOf(t), t.terminal].filter(Boolean).join(" · "),
-  right: t.state === "running" ? "running" : "",
+  right: isOpen(t) ? "running" : "",
   value: t, selected: t.id === v.turn?.id,
 }));
 
-/** A turn picked from the dropdown stays picked until the newest is picked again. */
+/** A turn picked from the dropdown stays picked, unless it is the one that would be picked anyway. */
 export function chooseTurn(v, turn) {
   v.turn = turn;
-  v.turnPinned = turn.id !== v.turns[0]?.id;
+  v.turnPinned = turn.id !== pickTurn(v.turns, v.from)?.id;
 }
 
 /**
@@ -75,7 +97,9 @@ export function chooseTurn(v, turn) {
  * walkthroughs written in the background are stored and announced.
  */
 export async function turnTick(v, cx) {
-  if (v.turnsDirty && await loadTurns(v) && v.scope === "turn") await v.reload(cx);
+  // An open turn can go stale with no file changing: its agent was quit. Looked at every 15 seconds.
+  const due = v.turns.some(isOpen) && Date.now() - (v.turnsRead ?? 0) > 15_000;
+  if ((v.turnsDirty || due) && await loadTurns(v) && v.scope === "turn") await v.reload(cx);
   if (v.auto !== "off") {
     if (agentStopped(v)) v.autoWanted = Date.now();
     if (v.autoWanted) {
@@ -87,14 +111,15 @@ export async function turnTick(v, cx) {
   }
   for (const b of [...v.background]) {
     const done = await finished(b.job);
-    if (!done && Date.now() < b.job.meta.deadline + 10_000) continue;
+    // Still running, unless the view took the answer itself (the turn was shown) and the folder is gone.
+    if (!done && Date.now() < b.job.meta.deadline + 10_000 && await jobOf(v.repo, b.job.meta.sk)) continue;
     v.background = v.background.filter((x) => x !== b);
     if (!done) continue; // run.sh stopped it; the folder is cleared the next time that turn is opened
     try {
       // null: the view itself (or another window) took the answer, and says so.
-      if (await finishJob(done)) announce(b.turn);
+      if (await finishJob(done)) announce(b.job.meta.source);
     } catch (e) {
-      notify({ title: "Walkthrough", body: `Couldn't write the walkthrough of "${firstLine(b.turn.prompt, 60)}": ${String(e?.message ?? e)}`, level: "warning" });
+      notify({ title: "Walkthrough", body: `Couldn't write the walkthrough of "${firstLine(b.job.meta.source?.prompt, 60)}": ${String(e?.message ?? e)}`, level: "warning" });
     }
     if (v.diff?.sk === done.meta.sk) await v.reload(cx);
   }
@@ -111,8 +136,9 @@ function agentStopped(v) {
   return stopped;
 }
 
-export function announce(turn) {
-  notify({ title: "Walkthrough ready", body: `Last turn: "${firstLine(turn?.prompt, 60) || "(empty prompt)"}"`, level: "success" });
+/** `source`: the turn's source, as its job keeps it. */
+export function announce(source) {
+  notify({ title: "Walkthrough ready", body: `Last turn: "${firstLine(source?.prompt, 60) || "(empty prompt)"}"`, level: "success" });
 }
 
 /**
@@ -121,7 +147,7 @@ export function announce(turn) {
  * AUTO_MAX_HUNKS, where Generate is waited for.
  */
 export async function autoGenerate(v, cx, turn) {
-  if (v.auto === "off" || !v.claude || !v.repo || !turn || turn.state === "running" || v.autoTried.has(turn.id)) return;
+  if (v.auto === "off" || !v.claude || !v.repo || !turn || isOpen(turn) || v.autoTried.has(turn.id)) return;
   v.autoTried.add(turn.id);
   try {
     const source = turnSource(turn);
@@ -135,8 +161,9 @@ export async function autoGenerate(v, cx, turn) {
     const prompt = preparePrompt(diff, { language: v.language, previous: null, preferences });
     if (!fits(prompt)) return;
     const job = await startJob(v.repo, diff, { key, model: AUTO_MODEL, language: v.language, prompt, source, auto: true });
+    // Followed here as well as by the view while the turn is shown, so switching away doesn't orphan it.
+    v.background.push({ job });
     if (v.diff?.sk === diff.sk) v.setJob(job);
-    else v.background.push({ job, turn });
   } catch {
     // A turn that can't be read now is read when it is opened, with its error.
   }

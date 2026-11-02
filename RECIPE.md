@@ -160,10 +160,18 @@ A dialog 74% of the window wide and 80% tall (`modal`), on `theme().popover`; as
   an interrupted one), one section with scope `turn`; its source key is `turn:<id>` and
   its description quotes the prompt's first line. A running turn's end is a snapshot taken
   now (into the turn's `now.index` and `objects/`), and the folder is watched as for
-  Uncommitted; a finished one doesn't change with the working tree.
+  Uncommitted; a finished one doesn't change with the working tree. A turn without
+  `end.meta` ends at the next turn of its session or its terminal; the newest one stays
+  running while its agent is `working` or `blocked`, and once it has been anything else
+  (or gone from `agents()`) for 2 minutes, or 12 hours with no terminal recorded, the mod
+  freezes it: a snapshot now, `end.meta` with `interrupted=1`. Open turns are listed again
+  every 15 s. New files over 1 MB in the end snapshot (`end.big`) and not in the start's
+  (`start.big`) are left out of the diff and listed "Not read: larger than 1 MB."
+- Picking a turn pins it, unless it is the one that would be picked anyway.
 - **Auto** (`autoGenerate` in the prefs: `on-open`, the default, or `off`): on open, the
-  newest turn, when finished and without a walkthrough by Haiku or by the picked model, is
-  written with Haiku in the background; in a pane (`props().overlay` unset), when an agent
+  turn the tab shows, when finished and without a walkthrough by Haiku or by the picked
+  model, is written with Haiku in the background (followed to its end even when another
+  turn is picked meanwhile); in a pane (`props().overlay` unset), when an agent
   of this tab (`agents()`, `tab` the pane's) goes from `working` to `done` or `idle`, its
   newest finished turn is, once its Stop hook has written `end.meta` (up to 20 s). Never
   past 300 hunks or the prompt limit, and once per turn per open walkthrough. A finished
@@ -246,7 +254,10 @@ Stop (a stop hook kept the agent going) ends it again, later. A snapshot: copy t
 repository's index (`git rev-parse --git-path index`, `cp -p`) to the turn's `index` once,
 then with `GIT_INDEX_FILE=<turn>/index GIT_OBJECT_DIRECTORY=<turn>/objects`, `git -c
 core.fsmonitor=false add -A -- . ':(exclude,literal)<each new file over 1 MB>'` and `git
-write-tree --missing-ok`. It prints nothing and always exits 0.
+write-tree --missing-ok`, after `git update-index --force-remove` of those big files (one
+that was small when the turn began is in the turn's index already). The big files go to
+`start.big` / `end.big`, one per line. A copied index git can't use is deleted and the
+snapshot run again without it. It prints nothing and always exits 0.
 
 ## Watch out
 
@@ -316,6 +327,10 @@ write-tree --missing-ok`. It prints nothing and always exits 0.
   print nothing, errors included. Claude Code runs no Stop hook for a turn stopped with
   Esc: read such a turn up to its session's next start.
 - `exec` takes no environment: run git as `exec("env", ["GIT_INDEX_FILE=…", "git", …])`.
+- Hash the turns folder's key inside the repository (`cwd` its top) in the hook and the
+  mod alike: outside one `git hash-object` uses SHA-1, inside a SHA-256 repository not.
+- Find big new files with `xargs -0 … find -size +1048576c`, not one `stat` per file:
+  thousands of untracked files would overflow the argument list.
 - Don't give a snapshot the repository's objects as an alternate: git updates the
   modification time of every object (and pack) it finds again while writing. Keep them
   out of sight and write the tree with `--missing-ok`; the files the copied index already

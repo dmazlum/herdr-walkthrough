@@ -122,8 +122,12 @@ written, not even their modification times. New files over 1 MB are left out, as
 everywhere else. It prints nothing, and any failure is a silent exit 0: it never holds an
 agent up. In a 6,000-file repository a snapshot takes about a second.
 
-A turn stopped with Esc gets no Stop hook from Claude Code; it is read up to the
-session's next prompt, and the newest turn still running is read up to now. Inside
+A turn stopped with Esc, or an agent quit mid-turn, gets no Stop hook from Claude Code.
+Such a turn ends at the next prompt of its session or its terminal (`/clear` starts a
+new session there). The newest one is read up to now while its agent works; once the
+agent has been quiet for two minutes (or, with no agent to ask, after 12 hours) its end
+is frozen at that moment, so it stops taking in later edits. New files over 1 MB a turn
+made are listed under Not covered, as everywhere else. Inside
 Herdr each turn records its terminal (`HC_TERMINAL_ID`), so the tab shows the turn of the
 agent you opened it over, and a pane knows which turns are its tab's.
 

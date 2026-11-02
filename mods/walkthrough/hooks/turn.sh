@@ -8,6 +8,7 @@
 # ~/.herdr/walkthrough/turns/<repo key>/<seconds>-<pid>/
 #   start.json, end.json   the hook's input, as Claude Code sent it
 #   start.meta, end.meta   tree=<snapshot>, when, session, terminal (written last)
+#   start.big, end.big     the new files over 1 MB each snapshot left out, one per line
 #   objects/               the blobs and trees of content the index didn't already name
 #   index                  the snapshot's own index (only the newest turn keeps it)
 #
@@ -34,9 +35,9 @@ field() {
   sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"\\\\]*\)\".*/\1/p" "$2" | head -n 1
 }
 
-# The tree of the working tree now: `snapshot <turn folder> <index>`.
+# The tree of the working tree now: `snapshot <turn folder> <index> <list of files left out>`.
 snapshot() {
-  turn=$1 index=$2
+  turn=$1 index=$2 list=$3
   if [ ! -f "$index" ]; then
     # The repository's own index, copied: its file stats spare re-reading every unchanged file.
     real=$(git rev-parse --path-format=absolute --git-path index) || return 1
@@ -45,9 +46,13 @@ snapshot() {
   # New files over the limit, as pathspecs that leave them out.
   big=$(git -c core.quotePath=false ls-files --others --exclude-standard -z \
     | xargs -0 sh -c '[ $# -gt 0 ] && find "$@" -prune -type f -size +'"$MAX_BYTES"'c' sh 2>/dev/null)
+  printf '%s\n' "$big" | grep -v '^$' > "$list"
   set -- .
   while IFS= read -r path; do
-    [ -n "$path" ] && set -- "$@" ":(exclude,literal)$path"
+    [ -n "$path" ] || continue
+    set -- "$@" ":(exclude,literal)$path"
+    # A file that was small when the turn began is in this index already: out with it too, or its old content stays.
+    GIT_INDEX_FILE="$index" git update-index --force-remove -- "$path" 2>/dev/null
   done <<EOF
 $big
 EOF
@@ -96,7 +101,7 @@ main() {
     for old in $(turns); do
       [ "$repo/$old" != "$turn" ] && rm -f "$repo/$old/index"
     done
-    tree=$(snapshot "$turn" "$turn/index") || { rm -rf "$turn"; return 0; }
+    tree=$(snapshot "$turn" "$turn/index" "$turn/start.big") || { rm -rf "$turn"; return 0; }
     put "$turn/start.meta" "tree=$tree
 started=$now
 session=$session
@@ -117,7 +122,7 @@ terminal=${HC_TERMINAL_ID:-}
     fi
   done
   [ -n "$turn" ] || return 0
-  tree=$(snapshot "$turn" "$turn/index") || return 0
+  tree=$(snapshot "$turn" "$turn/index" "$turn/end.big") || return 0
   mv "$input" "$turn/end.json"
   put "$turn/end.meta" "tree=$tree
 ended=$now

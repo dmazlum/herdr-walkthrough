@@ -3,7 +3,8 @@
 // text; reading the folder is engine.js's.
 //
 // A turn's folder: start.json and end.json (the hook's input, as sent),
-// start.meta and end.meta (`key=value` lines, written last), objects/.
+// start.meta and end.meta (`key=value` lines, written last), start.big and
+// end.big (the new files over 1 MB each snapshot left out), objects/.
 
 /** The hook's JSON → { prompt, session, cwd, event }. A prompt cut short (the listing reads a bounded head) is still recovered. */
 export function parseHook(text) {
@@ -39,10 +40,13 @@ const SHA = /^[0-9a-f]{40,64}$/;
 // Claude Code's JSON escapes control characters, so neither separator can come from a prompt.
 export const RECORD = "\x1e", FILE = "\x1f";
 
+const lines = (text) => (text == null ? [] : String(text).split("\n").filter(Boolean));
+
 /**
  * The folder's listing → turns, newest first: { id, dir, started, ended,
- * startTree, endTree, session, terminal, prompt }. A turn whose start
- * snapshot isn't written yet (or failed) is left out.
+ * startTree, endTree, frozen, startBig, endBig, session, terminal, prompt }.
+ * A turn whose start snapshot isn't written yet (or failed) is left out.
+ * `frozen`: the end was taken by the walkthrough, not by a Stop hook.
  */
 export function parseListing(out, folder) {
   const turns = [];
@@ -62,7 +66,8 @@ export function parseListing(out, folder) {
       id, dir: `${folder}/${id}`,
       started: Number(start.started) * 1000 || Number(id.split("-")[0]) * 1000,
       ended: SHA.test(end.tree ?? "") ? Number(end.ended) * 1000 || null : null,
-      startTree: start.tree, endTree: SHA.test(end.tree ?? "") ? end.tree : null,
+      startTree: start.tree, endTree: SHA.test(end.tree ?? "") ? end.tree : null, frozen: end.interrupted === "1",
+      startBig: lines(files["start.big"]), endBig: lines(files["end.big"]),
       session: start.session || hook.session || null, terminal: start.terminal || null, prompt: hook.prompt,
     });
   }
@@ -72,31 +77,48 @@ export function parseListing(out, folder) {
 /** Newest first, by when they started, then by name. */
 export const sortTurns = (turns) => [...turns].sort((a, b) => b.started - a.started || b.id.localeCompare(a.id));
 
+// A turn without an end is taken as over once its agent has been quiet this long (or, with no
+// agent to ask, once it is this old): a Stop hook comes within seconds of the agent finishing.
+export const QUIET = 2 * 60_000;
+export const UNKNOWN = 12 * 3600_000;
+
 /**
- * Where each turn ended. A turn the agent was stopped in (Esc: Claude Code
- * runs no Stop hook then) ended when its session's next prompt was sent; the
- * session's newest one without an end is still running, and is read up to now.
- * @returns {any[]} the turns, each with `endTree`, `endDir` (whose objects hold it) and `state`: "done" | "interrupted" | "running"
+ * Where each turn ended. Claude Code runs no Stop hook for a turn stopped with
+ * Esc, or for an agent quit mid-turn, so a turn without an end ended when the
+ * next prompt of its session, or of its terminal (`/clear` starts a new
+ * session there), was sent. Without one it is still running and read up to
+ * now, until its agent has been quiet for QUIET: then it is "stale", and the
+ * walkthrough freezes its end (engine.js closeTurn).
+ *
+ * `idleSince(terminal)`: null while that agent works (or waits on the person),
+ * the time it was first seen otherwise, undefined when there is no agent to ask.
+ * @returns {any[]} the turns, each with `endTree`, `endDir` (whose objects hold it),
+ *   `endBig` and `state`: "done" | "interrupted" | "running" | "stale"
  */
-export function resolveEnds(turns) {
+export function resolveEnds(turns, { idleSince = () => undefined, now = Date.now() } = {}) {
   const sorted = sortTurns(turns);
   return sorted.map((t, i) => {
-    if (t.endTree) return { ...t, endDir: t.dir, state: "done" };
-    const next = sorted.slice(0, i).reverse().find((n) => n.session === t.session);
-    if (next) return { ...t, endTree: next.startTree, endDir: next.dir, ended: next.started, state: "interrupted" };
-    return { ...t, endDir: null, state: "running" };
+    if (t.endTree) return { ...t, endDir: t.dir, state: t.frozen ? "interrupted" : "done" };
+    const next = sorted.slice(0, i).reverse().find((n) => n.session === t.session || (t.terminal && n.terminal === t.terminal));
+    if (next) return { ...t, endTree: next.startTree, endDir: next.dir, endBig: next.startBig, ended: next.started, state: "interrupted" };
+    const since = t.terminal ? idleSince(t.terminal) : undefined;
+    const over = typeof since === "number" ? now - Math.max(since, t.started) > QUIET : since === undefined && now - t.started > UNKNOWN;
+    return { ...t, endDir: null, endBig: null, state: over ? "stale" : "running" };
   });
 }
+
+/** Whether a turn is still open: read up to now, never written up without a click. */
+export const isOpen = (t) => t.state === "running" || t.state === "stale";
 
 /** The turn to show first: the newest of the terminal it was opened over, else the newest. */
 export function pickTurn(turns, terminal = null) {
   return (terminal && turns.find((t) => t.terminal === terminal)) || turns[0] || null;
 }
 
-/** The newest finished turn, of these terminals when given; null when the newest is still running. */
+/** The newest finished turn, of these terminals when given; null when the newest is still open. */
 export function lastFinished(turns, terminals = null) {
   const mine = terminals ? turns.filter((t) => terminals.includes(t.terminal)) : turns;
-  return mine[0] && mine[0].state !== "running" ? mine[0] : null;
+  return mine[0] && !isOpen(mine[0]) ? mine[0] : null;
 }
 
 /** A prompt's first line with text in it, cut to `max` characters. */
@@ -116,13 +138,16 @@ export function ago(ms, now = Date.now()) {
 }
 
 /** The source a turn is read as (see sources.js). */
-export const turnSource = (t) => ({ kind: "turn", id: t.id, dir: t.dir, startTree: t.startTree, endTree: t.state === "running" ? null : t.endTree, endDir: t.endDir, prompt: t.prompt });
+export const turnSource = (t) => ({
+  kind: "turn", id: t.id, dir: t.dir, startTree: t.startTree, endTree: isOpen(t) ? null : t.endTree, endDir: t.endDir,
+  startBig: t.startBig ?? [], endBig: isOpen(t) ? null : t.endBig ?? [], prompt: t.prompt,
+});
 
 /** The listing script engine.js runs in a repository's turns folder ($0). Prompts are read up to 64 KB. */
 export const LISTING = `cd "$0" 2>/dev/null || exit 0
 for d in $(ls -1 | grep -E '^[0-9]+-[0-9]+$'); do
   printf '\\036%s\\n' "$d"
-  for f in start.meta end.meta; do [ -f "$d/$f" ] && { printf '\\037%s\\n' "$f"; cat "$d/$f"; }; done
+  for f in start.meta end.meta start.big end.big; do [ -f "$d/$f" ] && { printf '\\037%s\\n' "$f"; cat "$d/$f"; }; done
   [ -f "$d/start.json" ] && { printf '\\037start.json\\n'; head -c 65536 "$d/start.json"; }
 done
 exit 0`;
