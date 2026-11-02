@@ -36,7 +36,18 @@ a Codex agent, or any other.
   true survives.
 - **Any scope.** Uncommitted (staged, unstaged and new files), Staged, Unstaged, a Branch
   against its base (committed and uncommitted, without what the base gained since), one
-  Commit, or an open Pull request on GitHub, as GitHub shows its changes.
+  Commit, an open Pull request on GitHub, as GitHub shows its changes, or an agent's
+  Last turn.
+- **Last turn.** What an agent changed while answering one prompt, and nothing else: not
+  the edits you had before it, not the ones you make after. Two Claude Code hooks take a
+  snapshot of the working tree when you send a prompt and when the agent stops (see
+  [Last turn](#last-turn)). Pick any of the last 20 turns by their prompt; the prompt is
+  handed to the model too, so the steps are explained against what was asked.
+- **Written while you wait.** With **Auto: while open** (the default), opening the
+  walkthrough writes the last finished turn's walkthrough if it has none, and a
+  walkthrough open as a pane writes one each time an agent in its tab finishes, then
+  says so in a notification. Only with Haiku, and only up to 300 hunks; past that it waits
+  for Generate. Already written means free: the cache answers.
 - **Pull requests.** Pick one of the repository's open pull requests (your branch's is picked
   for you) and read a colleague's change in order. When it gets new commits, the steps
   whose code moved are marked **Outdated**. **Post to #12** adds the walkthrough as a
@@ -80,6 +91,7 @@ Then merge [`keys.json`](keys.json) into `~/.config/herdr-app/keys.json`:
 | `x` | Mark the step read or unread |
 | `u` | Unread only: list and step through only the steps not read yet |
 | Esc | Close a picker, a comment, then the dialog |
+| Last turn → **Auto** | While open (default): write the last turn's walkthrough without a click; Off: only on Generate |
 | `walkthrough.generate`, `.cancel`, `.next`, `.prev`, `.copy`, `.unread` | The same, Copy as Markdown and Unread only, for your own keys |
 
 To keep it beside an agent instead of over it, open it as a pane:
@@ -95,6 +107,37 @@ change.
 ```sh
 cp -R herdr-walkthrough/mods/walkthrough ~/.config/herdr-app/mods/
 ```
+
+## Last turn
+
+The Last turn tab needs two hooks in `~/.claude/settings.json`; the walkthrough never
+edits your settings itself. Until a turn is recorded, the tab shows these with a
+**Copy settings** button. Merge them with any hooks you already have:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "sh \"$HOME/.config/herdr-app/mods/walkthrough/hooks/turn.sh\" start", "timeout": 30 }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "sh \"$HOME/.config/herdr-app/mods/walkthrough/hooks/turn.sh\" stop", "timeout": 30 }] }]
+  }
+}
+```
+
+[`hooks/turn.sh`](mods/walkthrough/hooks/turn.sh) needs only `sh` and `git`. It runs
+`git add -A && git write-tree` against an index and an object folder of its own under
+`~/.herdr/walkthrough/turns/`, so the repository's index, refs and objects are never
+written, not even their modification times. New files over 1 MB are left out, as
+everywhere else. It prints nothing, and any failure is a silent exit 0: it never holds an
+agent up. In a 6,000-file repository a snapshot takes about a second.
+
+A turn stopped with Esc, or an agent quit mid-turn, gets no Stop hook from Claude Code.
+Such a turn ends at the next prompt of its session or its terminal (`/clear` starts a
+new session there). The newest one is read up to now while its agent works; once the
+agent has been quiet for two minutes (or, with no agent to ask, after 12 hours) its end
+is frozen at that moment, so it stops taking in later edits. New files over 1 MB a turn
+made are listed under Not covered, as everywhere else. Inside
+Herdr each turn records its terminal (`HC_TERMINAL_ID`), so the tab shows the turn of the
+agent you opened it over, and a pane knows which turns are its tab's.
 
 ## Updates
 
@@ -120,7 +163,8 @@ herdr-app check ~/.config/herdr-app/mods/walkthrough
 
 ## What it runs
 
-Nothing is generated until you press **Generate**. Opening the walkthrough only reads git
+Nothing is generated until you press **Generate**, except an agent's last turn while
+**Auto** is on (with Haiku, up to 300 hunks; see [Last turn](#last-turn)). Opening the walkthrough only reads git
 (and, on the Pull request tab, asks `gh` for the open pull requests and the picked one's diff).
 Nothing is posted until you press **Post** and confirm.
 
@@ -136,6 +180,7 @@ Everything is kept in `~/.herdr/walkthrough/`:
 | `entries/<key>.json` | Finished walkthroughs, the newest 200 |
 | `pointers/<place>.json` | The one shown last per repository and scope |
 | `jobs/<place>/` | A generation in progress: its prompt, `run.sh`, and the answer |
+| `turns/<repo>/<turn>/` | The last 20 turns per repository, written by `hooks/turn.sh`: the hook's input, the snapshots' trees, the objects they needed |
 | `read/<repo>.json` | The hunks you've read in a repository, by content, the newest 5,000 |
 | `clipboard.md` | The last walkthrough copied as Markdown |
 | `pr-comment.md` | The last walkthrough posted to a pull request |
@@ -157,6 +202,8 @@ walkthrough of half a diff reads exactly as confidently as one of the whole.
   Branch. A pull request is read again when you pick its tab or it, not while it is open.
 - A page draws at most 2,500 lines of code; the rest is counted.
 - Comments are kept while the walkthrough is open, and sent with Enter.
+- Last turn records Claude Code's turns only (other agents have no such hooks yet), and
+  writes walkthroughs without a click only while the walkthrough is open.
 - What you read is written once a second; a mark made in the last second before Herdr quits
   can be lost.
 - A step counts as changed since you read it when part of it was read, or when a hunk you
@@ -165,13 +212,17 @@ walkthrough of half a diff reads exactly as confidently as one of the whole.
 
 ## Roadmap
 
+- **Auto when closed** (`autoGenerate: "on-stop"`). Write a turn's walkthrough when the
+  agent stops, with no walkthrough open, by the Stop hook starting a background run
+  (`node bin/prewarm.mjs`). Planned: it needs the engine's Herdr calls behind an
+  interface that Node can provide.
 - **Codex as a model runner.** Generate a walkthrough with `codex exec` and its JSON schema
   output, as a choice beside Haiku, Sonnet and Opus.
 
 ## Development
 
 ```sh
-npm test    # parsing, hunk ids, digest, prompt, normalizing, staleness, read tracking, Markdown export, syntax colours, gh (faked), and git against real repos
+npm test    # parsing, hunk ids, digest, prompt, normalizing, staleness, read tracking, Markdown export, syntax colours, gh (faked), turns, and git and turn.sh against real repos
 ```
 
 The UI is checked in Herdr: `herdr-app check`, then `herdr-app shot` while it is open.

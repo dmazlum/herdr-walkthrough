@@ -18,11 +18,14 @@ A dialog 74% of the window wide and 80% tall (`modal`), on `theme().popover`; as
    the right, in a dialog, a ghost "Esc" button.
 2. **Toolbar**, at least 42px, padding 7px 14px, wrapping when narrow:
    - scope tabs in a `raised` pill (radius 7, padding 2): Uncommitted, Staged, Unstaged,
-     Branch, Commit, Pull request; 22px tall, 12px; the chosen one on `popover`, semibold, the rest
+     Branch, Commit, Pull request, Last turn; 22px tall, 12px; the chosen one on `popover`, semibold, the rest
      `muted`. Each has a tooltip saying what it reads.
    - Branch adds "vs" and a dropdown of the base; Commit adds a dropdown of the commit
      (`short subject`); Pull request, once some are listed, a dropdown of the open pull
-     requests (`#12 title`, hint "author · head → base", "· draft", "· this branch").
+     requests (`#12 title`, hint "author · head → base", "· draft", "· this branch"); Last
+     turn, once a turn is recorded, a dropdown of the turns (the prompt's first line, hint
+     "5 min ago · took 1:20 · t3", "still running" or "interrupted") and **Auto: while
+     open** / **Auto: off**.
    - right: a braille spinner while the diff is read, the model dropdown (Haiku, Sonnet,
      Opus), the language dropdown (its own name: Türkçe, Deutsch …), and the action:
      **Generate** (solid) with nothing exact on screen, **Regenerate** (outline) over an
@@ -40,7 +43,12 @@ A dialog 74% of the window wide and 80% tall (`modal`), on `theme().popover`; as
    - a centered message: another machine, "Reading…", "Not a git repository.", "Pick the
      branch to compare with.", "Pick a pull request.", "Reading the pull requests…",
      "No open pull requests.", "Couldn't list the pull requests." with gh's reason, "Nothing to
-     walk through." (no changes in that scope), or the git or gh error;
+     walk through." (no changes in that scope; for a turn "This turn changed no files."),
+     or the git or gh error;
+   - **hook help** (Last turn, no turn recorded), a 620px column: "No turns recorded in this
+     repository yet" 18px semibold, two `muted` paragraphs (what the hooks do, where the
+     snapshots go, that the walkthrough doesn't edit settings), the settings JSON in the
+     terminal font on `raised` in a bordered box, and a solid **Copy settings**;
    - **intro** (no walkthrough yet), a 620px column: "Read this change in the order it
      makes sense" 18px semibold, one paragraph in `muted`, chips for files, hunks,
      "≈ 3k tokens" (red past the limit), "N generated, not sent" and "N not read", red
@@ -165,7 +173,32 @@ A dialog 74% of the window wide and 80% tall (`modal`), on `theme().popover`; as
   65,536 characters it refuses. The footer says "Posted the walkthrough to #12." or why not.
 - Agent statuses (working, blocked, done, idle) are not shown; the agent dropdown names the
   program and the terminal.
-- Model, language, scope and each repository's base are remembered in
+- **Last turn** reads `~/.herdr/walkthrough/turns/<repo>/` (`<repo>`: the first 16 digits of
+  `printf %s <top> | git hash-object --stdin`), watched with `watchFolder`, newest turn
+  first; the turn shown is the newest of the terminal the dialog opened over, else the
+  newest, until one is picked by hand. A turn is `git diff <start tree> <end tree>` with
+  `GIT_ALTERNATE_OBJECT_DIRECTORIES` set to the turn's `objects/` (and the next turn's, for
+  an interrupted one), one section with scope `turn`; its source key is `turn:<id>` and
+  its description quotes the prompt's first line. A running turn's end is a snapshot taken
+  now (into the turn's `now.index` and `objects/`), and the folder is watched as for
+  Uncommitted; a finished one doesn't change with the working tree. A turn without
+  `end.meta` ends at the next turn of its session or its terminal; the newest one stays
+  running while its agent is `working` or `blocked`, and once it has been anything else
+  (or gone from `agents()`) for 2 minutes, or 12 hours with no terminal recorded, the mod
+  freezes it: a snapshot now, `end.meta` with `interrupted=1`. Open turns are listed again
+  every 15 s. New files over 1 MB in the end snapshot (`end.big`) and not in the start's
+  (`start.big`) are left out of the diff and listed "Not read: larger than 1 MB."
+- Picking a turn pins it, unless it is the one that would be picked anyway.
+- **Auto** (`autoGenerate` in the prefs: `on-open`, the default, or `off`): on open, the
+  turn the tab shows, when finished and without a walkthrough by Haiku or by the picked
+  model, is written with Haiku in the background (followed to its end even when another
+  turn is picked meanwhile); in a pane (`props().overlay` unset), when an agent
+  of this tab (`agents()`, `tab` the pane's) goes from `working` to `done` or `idle`, its
+  newest finished turn is, once its Stop hook has written `end.meta` (up to 20 s). Never
+  past 300 hunks or the prompt limit, and once per turn per open walkthrough. A finished
+  run posts `notify({ title: "Walkthrough ready", body: 'Last turn: "…"', level:
+  "success" })`. `on-stop` (written with the walkthrough closed) is planned.
+- Model, language, scope, Auto and each repository's base are remembered in
   `shared("walkthrough.prefs")`. The first language is the system's (`defaults read -g
   AppleLanguages`, else `$LANG`).
 - Keys from `keys.json`: `cmd-shift-k` → `mod.open:walkthrough`. Mod commands:
@@ -210,9 +243,47 @@ A dialog 74% of the window wide and 80% tall (`modal`), on `theme().popover`; as
   newest 5,000 marks kept, written on the 1s tick when something changed: this window's
   changed keys over what is on disk now, so two windows keep each other's marks.
 - `herdr`: `exec`, `hc` (`send`), `readTextFile`, `writeTextFile`, `watchFolder`, `home`,
-  `focused`, `panes`, `spaces`, `agents`, `shared`/`setShared`, `nextCommand`, `props`,
-  `closeOverlay`, `theme`, `settings().font_family`. Programs run: `git`, `claude`, `sh`,
-  `nohup`, `kill`, `mkdir`, `rm`, `ls`, `wc`, `defaults`.
+  `appHome`, `focused`, `panes`, `spaces`, `agents`, `notify`, `shared`/`setShared`,
+  `nextCommand`, `props`, `closeOverlay`, `theme`, `settings().font_family`. Programs run:
+  `git`, `claude`, `sh`, `env`, `nohup`, `kill`, `mkdir`, `rm`, `ls`, `wc`, `defaults`.
+- `turnview.js` (the Last turn tab's state, Auto and the hook help), `lib/turns.js` (the
+  hook's JSON, `.meta` lines, the folder listing, where each turn ended, the settings
+  snippet), `hooks/turn.sh`.
+
+## Hooks for Last turn
+
+The Last turn tab reads turns recorded by two Claude Code hooks running
+`mods/walkthrough/hooks/turn.sh`. After copying the mod, **ask the person** whether to add
+them; with a yes, merge these into `~/.claude/settings.json`, keeping every hook already
+there (append to the `UserPromptSubmit` and `Stop` arrays, never replace them), with the
+path of the installed copy (a renamed folder keeps its new name):
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "sh \"$HOME/.config/herdr-app/mods/walkthrough/hooks/turn.sh\" start", "timeout": 30 }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "sh \"$HOME/.config/herdr-app/mods/walkthrough/hooks/turn.sh\" stop", "timeout": 30 }] }]
+  }
+}
+```
+
+With a no, say the tab shows the same settings and a Copy button. The mod itself never
+writes the settings.
+
+`turn.sh start` (UserPromptSubmit) saves stdin unparsed as `start.json` in
+`turns/<repo>/<seconds>-<pid>/`, snapshots the working tree and writes `start.meta`
+(`tree=`, `started=`, `session=`, `terminal=$HC_TERMINAL_ID`) last; then keeps the
+newest 20 turns, removing older folders with their `objects/`, and drops the `index` of
+all but the newest. `turn.sh stop` (Stop) snapshots again into the session's newest turn
+(found by `session=`) and writes `end.json` and `end.meta` (`tree=`, `ended=`); a second
+Stop (a stop hook kept the agent going) ends it again, later. A snapshot: copy the
+repository's index (`git rev-parse --git-path index`, `cp -p`) to the turn's `index` once,
+then with `GIT_INDEX_FILE=<turn>/index GIT_OBJECT_DIRECTORY=<turn>/objects`, `git -c
+core.fsmonitor=false add -A -- . ':(exclude,literal)<each new file over 1 MB>'` and `git
+write-tree --missing-ok`, after `git update-index --force-remove` of those big files (one
+that was small when the turn began is in the turn's index already). The big files go to
+`start.big` / `end.big`, one per line. A copied index git can't use is deleted and the
+snapshot run again without it. It prints nothing and always exits 0.
 
 ## Watch out
 
@@ -284,6 +355,23 @@ A dialog 74% of the window wide and 80% tall (`modal`), on `theme().popover`; as
 - Write read marks by merging the keys changed here into the file as it is now; writing the
   whole record back would drop another window's marks.
 - Remote spaces are not supported.
+- A UserPromptSubmit hook's plain stdout is added to Claude's context: `turn.sh` must
+  print nothing, errors included. Claude Code runs no Stop hook for a turn stopped with
+  Esc: read such a turn up to its session's next start.
+- `exec` takes no environment: run git as `exec("env", ["GIT_INDEX_FILE=…", "git", …])`.
+- Hash the turns folder's key inside the repository (`cwd` its top) in the hook and the
+  mod alike: outside one `git hash-object` uses SHA-1, inside a SHA-256 repository not.
+- Find big new files with `xargs -0 … find -size +1048576c`, not one `stat` per file:
+  thousands of untracked files would overflow the argument list.
+- Don't give a snapshot the repository's objects as an alternate: git updates the
+  modification time of every object (and pack) it finds again while writing. Keep them
+  out of sight and write the tree with `--missing-ok`; the files the copied index already
+  names point at the repository's objects, and the turn is read with both.
+- Copy the index with `cp -p`: a copy with a new modification time makes git trust the
+  stats of a file edited in the same second as the index was written (racy git), and a
+  same-size edit is missed.
+- Last turn's `on-stop` (written when the agent stops, with no walkthrough open, by
+  `node bin/prewarm.mjs`) is planned and not built: the engine calls `herdr` directly.
 - Claude Code is the only model runner; Codex (`codex exec` with a JSON schema) is planned
   and not built.
 
@@ -304,6 +392,11 @@ A dialog 74% of the window wide and 80% tall (`modal`), on `theme().popover`; as
 - Commit on the root commit shows every file as added.
 - Clicking a line, typing and Enter adds a comment under it; Send pastes it into the
   chosen agent.
+- With the hooks added, a prompt that edits a file and adds one shows on Last turn as
+  exactly those two files, not edits made before or after it; the repository's
+  `.git/index` and `.git/objects` are byte for byte and time for time as they were.
+- In a pane with Auto on, an agent finishing a turn brings a "Walkthrough ready"
+  notification and the turn's walkthrough, by Haiku.
 - → through two steps ticks them; close and reopen: the ticks are there, "2 / N read", and it
   opens on the first step not read. Stage the code: still ticked. `u` hides the read steps.
 - Edit a line a read step covers and reopen: "1 step changed since you last read it." Go →

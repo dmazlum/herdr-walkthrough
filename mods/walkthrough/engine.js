@@ -4,11 +4,12 @@
 //   entries/<key>.json     a finished walkthrough, named by everything that decides it
 //   pointers/<place>.json  the one shown last for a repository and source
 //   jobs/<place>/          a generation in progress (run.sh, prompt, answer)
+//   turns/<repo>/<turn>/   an agent's turn, written by hooks/turn.sh (see lib/turns.js)
 //   read/<repo>.json       the hunks read in a repository, by content
 //   preferences.md         optional: the reader's own wishes, added to every prompt
 
-import { exec, home, readTextFile, writeTextFile } from "herdr";
-import { loadSections, sourceKey, describe, git, worthReading, ghError } from "./lib/sources.js";
+import { exec, home, appHome, readTextFile, writeTextFile } from "herdr";
+import { loadSections, sourceKey, describe, git, worthReading, ghError, turnsKey, snapshotTree } from "./lib/sources.js";
 import { buildDigest } from "./lib/digest.js";
 import { buildPrompt } from "./lib/prompt.js";
 import { SCHEMA, normalize, VERSION } from "./lib/walkthrough.js";
@@ -16,6 +17,7 @@ import { cacheKey, codeKey, placeKey, deadline, MAX_PROMPT_CHARS } from "./lib/c
 import { longHash } from "./lib/hash.js";
 import { mergeRead } from "./lib/read.js";
 import { jobScript, readOutcome, isRunCommand } from "./lib/job.js";
+import { parseListing, resolveEnds, LISTING } from "./lib/turns.js";
 
 const MAX_ENTRIES = 200;
 export const dataDir = () => `${home()}/.herdr/walkthrough`;
@@ -148,6 +150,39 @@ async function touch(path) {
   await exec("touch", [path]).catch(() => undefined);
 }
 
+/** Whether a walkthrough with exactly this key is stored. */
+export const hasEntry = async (key) => (await readJson(entryPath(key)))?.version === VERSION;
+
+/** Where the installed hook script is, for the settings snippet: the mod's own folder. */
+export const hookScript = () => `${appHome()}/mods/walkthrough/hooks/turn.sh`;
+
+/** A repository's turns folder, named as hooks/turn.sh names it. Made here so it can be watched before the first turn. */
+export async function turnsFolder(top) {
+  const key = await turnsKey(exec, top);
+  if (!key) return null;
+  const dir = `${dataDir()}/turns/${key}`;
+  await exec("mkdir", ["-p", dir]).catch(() => undefined);
+  return dir;
+}
+
+/** A repository's turns, newest first, each with where it ended (lib/turns.js; `ends`: resolveEnds' options). */
+export async function listTurns(folder, ends = {}) {
+  if (!folder) return [];
+  const r = await exec("sh", ["-c", LISTING, folder]).catch(() => null);
+  return resolveEnds(parseListing(r?.stdout ?? "", folder), ends);
+}
+
+/**
+ * Ends a turn no Stop hook ended and whose agent has gone quiet (it was quit,
+ * or stopped and left): its end is the working tree now, marked interrupted,
+ * so it stops following later edits. A Stop hook arriving after all ends it again.
+ */
+export async function closeTurn(top, turn) {
+  const { tree, big } = await snapshotTree(exec, top, { index: `${turn.dir}/now.index`, objects: `${turn.dir}/objects` });
+  await write(`${turn.dir}/end.big`, big.map((p) => `${p}\n`).join(""));
+  await write(`${turn.dir}/end.meta`, `tree=${tree}\nended=${Math.floor(Date.now() / 1000)}\ninterrupted=1\n`);
+}
+
 /** The hunks read in a repository: { "<path>:<digest>": ms }, empty when none are. */
 export async function loadRead(top) {
   const read = await readJson(readPath(top));
@@ -184,7 +219,7 @@ export async function jobOf(repo, sk) {
 }
 
 /** Starts a generation in the background and returns its job. */
-export async function startJob(repo, diff, { key, model, language, prompt, source, before = [] }) {
+export async function startJob(repo, diff, { key, model, language, prompt, source, auto = false, before = [] }) {
   await ensureDirs();
   const dir = jobDir(placeKey(repo.top, diff.sk));
   // A run still going there (another window started it) is stopped, not orphaned.
@@ -193,7 +228,7 @@ export async function startJob(repo, diff, { key, model, language, prompt, sourc
   await exec("mkdir", ["-p", dir]);
   const meta = {
     key, code: codeKey(diff.files), model, language, top: repo.top, source, sk: diff.sk, started: Date.now(), deadline: Date.now() + deadline(diff.hunkCount),
-    idByAlias: diff.idByAlias, digestFiles: diff.digestFiles, hunkCount: diff.hunkCount, before,
+    idByAlias: diff.idByAlias, digestFiles: diff.digestFiles, hunkCount: diff.hunkCount, auto, before,
   };
   await writeTextFile(`${dir}/system.txt`, prompt.system, null);
   await writeTextFile(`${dir}/prompt.txt`, prompt.prompt, null);
