@@ -2,113 +2,125 @@
 
 [![CI](https://github.com/dmazlum/herdr-walkthrough/actions/workflows/ci.yml/badge.svg)](https://github.com/dmazlum/herdr-walkthrough/actions/workflows/ci.yml)
 
-Read a change in the order it makes sense, not in the order of its file names. In
-[Herdr](https://herdr.dev), Claude groups a diff's edits into steps, puts them in an order
-where each one builds on the last, and explains what each step changes. The code each step
-talks about is shown under its explanation, in syntax colours from your theme.
+**Read a change in the order it makes sense, not in the order of its file names.**
 
-It explains, it doesn't judge. There are no findings, scores or verdicts. Built for reading
-what an agent (or a colleague) just wrote before you accept it.
+A [Herdr](https://herdr.dev) mod for reading what an agent, or a colleague, just wrote
+before you accept it. Claude groups the diff into steps, puts them in an order where each
+one builds on the last, and explains what each step changes, with its code right below.
+
+It explains; it doesn't judge. No findings, no scores, no verdicts.
 
 ![Walkthrough](preview.png)
 
-Requires the **Herdr desktop app 0.1.9+**, **git**, and **Claude Code** (`claude`, logged in).
-Codex as a model runner is planned (see [Roadmap](#roadmap)); comments can already be sent to
-a Codex agent, or any other.
+## Quick start
 
-## Features
+You need the **Herdr desktop app 0.1.9+**, **git**, and **Claude Code** (`claude`, logged in).
 
-- **Steps, in reading order.** Related hunks across files form one step; types and entry
-  points come before the code that uses them; tests sit with the code they prove. Steps are
-  grouped into a few parts, listed on the left.
+1. **Install.** In Herdr, ask your agent:
+   *"Add the mod github.com/dmazlum/herdr-walkthrough"*. It's also listed at
+   [herdr.dev/mods](https://herdr.dev/mods). To do it by hand, see [Install by hand](#install-by-hand).
+2. **Open it.** Focus a terminal in a git repository and press **⌘⇧K**.
+3. **Pick what to read** (Uncommitted, Branch, a Pull request, the agent's Last turn…)
+   and press **Generate**. A small change costs about $0.002 with Haiku.
+
+Then read with **←** and **→**. Want the agent's last turn written up for you, without a
+click? Add the two [Last turn hooks](#last-turn).
+
+## What you get
+
+### A diff you can read top to bottom
+
+- **Steps in reading order.** Related edits across files become one step. Types and entry
+  points come before the code that uses them; tests sit with the code they prove. Steps
+  are grouped into a few parts, listed on the left, and each one's code is shown in your
+  theme's syntax colours.
 - **Where to look first.** *Key change* marks the step or two the rest depends on;
-  *Context* marks supporting edits that are safe to skim.
-- **Notes, rarely.** A few steps carry a note about something you accept by taking the
-  change: a *Decision* that could have gone another way, *Upkeep* the project now carries, a
-  *Limitation* users still hit, a *Divergence* between two paths, or a promise left
-  *Untested*. Notes state facts; they never call code wrong.
-- **Nothing hidden.** Every hunk no step covers is listed under **Not covered**, file by
-  file, with a one-line note on what changed there. Lockfiles, bundles and other generated
-  files are not sent to the model, but are listed too.
-- **Honest about staleness.** Each step is tied to the exact content of its hunks. Edit the
-  code and the steps whose code moved are marked **Outdated**, live, and the new edits show
-  under Not covered. **Regenerate** hands the old walkthrough to the model so what is still
-  true survives.
-- **Any scope.** Uncommitted (staged, unstaged and new files), Staged, Unstaged, a Branch
-  against its base (committed and uncommitted, without what the base gained since), one
-  Commit, an open Pull request on GitHub, as GitHub shows its changes, or an agent's
-  Last turn.
-- **Last turn.** What an agent changed while answering one prompt, and nothing else: not
-  the edits you had before it, not the ones you make after. Two Claude Code hooks take a
-  snapshot of the working tree when you send a prompt and when the agent stops (see
-  [Last turn](#last-turn)). Pick any of the last 20 turns by their prompt; the prompt is
-  handed to the model too, so the steps are explained against what was asked.
-- **Matched against the task.** A walkthrough is matched against what the change was
-  for, and opens on it: each request in the task, ✓ shown in this diff, ◐ partly, ○ not in
-  this diff, with links to the steps that carry it out, then the steps no request points at.
-  Each step says which request it serves. The task is found for you: a Last turn's prompt
-  (with its session's earlier prompts, so "yes, the second one" reads), a pull request's
-  description, a commit's message (a merge's: the pull request's title), or for local
-  changes and branches the prompts you sent to Claude Code in this repository since the
-  last commit or since the branch left its base. Or write your own, or turn it off, from
-  the **Task** menu. It says where a request shows up, never whether it is done well.
-- **Written while you wait.** With **Auto: while open** (the default), opening the
-  walkthrough writes the last finished turn's walkthrough if it has none (not one whose
-end the walkthrough had to guess; see [Last turn](#last-turn)), and a
-  walkthrough open as a pane writes one each time an agent in its tab finishes, then
-  says so in a notification. Only with Haiku, and only up to 300 hunks; past that it waits
-  for Generate. Already written means free: the cache answers.
-- **Pull requests.** Pick one of the repository's open pull requests (your branch's is picked
-  for you) and read a colleague's change in order. When it gets new commits, the steps
-  whose code moved are marked **Outdated**. **Post to #12** adds the walkthrough as a
-  comment on the pull request, after you confirm.
-- **Model and language per walkthrough.** Haiku (default), Sonnet or Opus; explanations in
-  fourteen languages, starting from your system's. Identifiers and paths stay as they are.
-- **What you've read, remembered.** Moving on from a step marks it read; `x` marks it read
-  or unread again. The ticks stay when you close the dialog, switch scope, stage the code or
-  regenerate: a hunk is read by its content, so only an edit makes it unread. `u` lists and
-  steps through only what is left. Open a walkthrough after the code moved and it says which
-  steps changed since you last read them; under Not covered, the hunks you haven't read stand
-  out.
-- **Paid once.** Walkthroughs are cached by the exact content of the diff, model and
-  language. Put the code back the way it was and the earlier walkthrough is back, free.
-- **Runs in the background.** Close the dialog, or Herdr; the walkthrough is waiting when
-  you come back.
-- **Comments to your agent.** Click any line to comment on it, then **Send** pastes all
-  comments, with the line and its code, into an agent in the same space.
-- **Copy as Markdown.** The task's requests, the steps, their order, weights and notes, and
-  what no step covers, on the clipboard: paste it into a pull request's description, a
-  review or a chat. The code stays out; wherever you paste it, the diff is already beside
-  it. It sits between `<!-- walkthrough -->` marks (GitHub hides them), so a pull request
-  description holding one isn't read back as the task. Posted to a pull request, the task
-  is left out unless it was that pull request's own description: your prompts and your own
-  words aren't published.
+  *Context* marks edits that are safe to skim.
+- **Notes, only when they matter.** A step can say what you accept by taking the change:
+  a *Decision* that could have gone another way, *Upkeep* the project now carries, a
+  *Limitation* users still hit, a *Divergence* between two paths, or something *Untested*.
+  Notes state facts; they never call code wrong.
+- **Nothing hidden.** Every edit no step explains is listed under **Not covered**, with a
+  line on what changed. Lockfiles and generated files aren't sent to the model, but are
+  listed too.
 
-## Install
+### Any change you want to read
 
-In Herdr, ask your agent to add `github.com/dmazlum/herdr-walkthrough` (it's listed at
-[herdr.dev/mods](https://herdr.dev/mods)): it reads [`RECIPE.md`](RECIPE.md) and every file,
-copies `mods/walkthrough`, merges [`keys.json`](keys.json) and checks the mod. Or by hand:
-
-```sh
-git clone https://github.com/dmazlum/herdr-walkthrough
-cp -R herdr-walkthrough/mods/walkthrough ~/.config/herdr-app/mods/
-herdr-app check ~/.config/herdr-app/mods/walkthrough
-```
-
-Then merge [`keys.json`](keys.json) into `~/.config/herdr-app/keys.json`:
-
-| Key / command | What it does |
+| Tab | What it shows |
 | --- | --- |
-| `cmd-shift-k` → `mod.open:walkthrough` | Open the walkthrough of the focused terminal's repository |
-| `←` `→` (or `j` `k`) | Previous / next step; moving on marks the step read |
-| `x` | Mark the step read or unread |
-| `u` | Unread only: list and step through only the steps not read yet |
-| `t` | The task's page (`←` from the first step goes there too) |
-| **Task** menu | Found (default), Your own… (write it), or Off; kept per repository and scope |
-| Esc | Close a picker, the task editor, a comment, then the dialog |
-| Last turn → **Auto** | While open (default): write the last turn's walkthrough without a click; Off: only on Generate |
-| `walkthrough.generate`, `.cancel`, `.next`, `.prev`, `.copy`, `.unread`, `.task` | The same, Copy as Markdown, Unread only and writing your own task, for your own keys |
+| **Uncommitted** | Everything not committed yet: staged, unstaged and new files |
+| **Staged** / **Unstaged** | One half of it |
+| **Branch** | Your branch against its base, without what the base gained since |
+| **Commit** | One commit |
+| **Pull request** | An open pull request on GitHub, as GitHub shows it (your branch's is picked for you) |
+| **Last turn** | Only what an agent changed while answering one prompt: not your edits before it, not the ones after |
+
+### Matched against what was asked
+
+A walkthrough opens on the **task**: each thing that was asked for, marked
+✓ shown in this diff, ◐ partly, or ○ not in this diff, with links to the steps that do it.
+Each step says which request it serves, and steps no request asked for are listed too.
+
+You don't have to type the task. It's found for you: the Last turn's prompt, the pull
+request's description, the commit's message, or the prompts you sent to Claude Code since
+the last commit. You can also write your own, or turn it off, from the **Task** menu. It
+says *where* a request shows up, never whether it's done well.
+
+### Honest when the code moves on
+
+- **Outdated, live.** Each step is tied to the exact code it explains. Edit that code and
+  the step is marked **Outdated** right away; new edits show under Not covered.
+  **Regenerate** keeps what's still true.
+- **What you've read, remembered.** Moving past a step marks it read (`x` toggles it).
+  Ticks survive closing, staging and regenerating; only a real edit makes code unread
+  again. `u` shows only what's left, and on reopening you're told which steps changed
+  since you read them.
+
+![An outdated step](docs/outdated.png)
+
+### Share it, or send it back
+
+- **Comment on any line**, then **Send** pastes your comments, with their code, into an
+  agent in the same space.
+- **Copy as Markdown** for a pull request description, a review or a chat. The code stays
+  out (the diff is already beside it). It sits between hidden `<!-- walkthrough -->`
+  marks, so a description holding one isn't read back as the task.
+- **Post to #12** adds the walkthrough as a comment on the pull request, after you confirm.
+  Your prompts are never posted.
+
+### Cheap, and out of your way
+
+- **Paid once.** Walkthroughs are cached by the exact diff, model and language. Undo a
+  change and the earlier walkthrough is back, free.
+- **Runs in the background.** Close the dialog, or Herdr; it's waiting when you're back.
+- **Written while you wait.** With **Auto** on (the default), opening the walkthrough
+  writes up the agent's last turn with Haiku if it has none yet. Open as a pane, it writes
+  one each time an agent in its tab finishes, and tells you. Over 300 hunks it waits for
+  Generate.
+- **Your model and language.** Haiku (default), Sonnet or Opus; explanations in fourteen
+  languages, starting from your system's. Code and paths stay as they are.
+
+## Keys
+
+| Key | What it does |
+| --- | --- |
+| **⌘⇧K** | Open the walkthrough of the focused terminal's repository |
+| **←** **→** (or **j** **k**) | Previous / next step; moving on marks a step read |
+| **x** | Mark the step read or unread |
+| **u** | Unread only: step through only what you haven't read |
+| **t** | The task page (**←** from the first step goes there too) |
+| **Esc** | Close a picker, the task editor or a comment, then the dialog |
+
+<details>
+<summary>Menus and commands for your own keys</summary>
+
+| Menu / command | What it does |
+| --- | --- |
+| **Task** menu | Found (default), Your own… (write it), or Off; kept per repository and tab |
+| Last turn → **Auto** | While open (default): write the last turn's walkthrough without a click. Off: only on Generate |
+| `walkthrough.generate`, `.cancel`, `.next`, `.prev`, `.copy`, `.unread`, `.task` | Generate, cancel, move, Copy as Markdown, Unread only and write your own task |
+
+</details>
 
 To keep it beside an agent instead of over it, open it as a pane:
 
@@ -116,19 +128,14 @@ To keep it beside an agent instead of over it, open it as a pane:
 herdr-app do pane.split --direction right --mod walkthrough --props '{"scope":"branch"}'
 ```
 
-While developing, copy the folder again after each change; Herdr reloads the mod within
-a second. Copy, don't symlink: Herdr doesn't reload a symlinked mod folder when its files
-change.
-
-```sh
-cp -R herdr-walkthrough/mods/walkthrough ~/.config/herdr-app/mods/
-```
-
 ## Last turn
 
-The Last turn tab needs two hooks in `~/.claude/settings.json`; the walkthrough never
-edits your settings itself. Until a turn is recorded, the tab shows these with a
-**Copy settings** button. Merge them with any hooks you already have:
+The Last turn tab shows exactly what an agent changed while answering one prompt. It
+needs two Claude Code hooks: one takes a snapshot of your working tree when you send a
+prompt, the other when the agent stops. The walkthrough never edits your settings
+itself. Until a turn is recorded, the tab shows these with a **Copy settings** button.
+
+Add them to `~/.claude/settings.json`, next to any hooks you already have:
 
 ```json
 {
@@ -139,39 +146,94 @@ edits your settings itself. Until a turn is recorded, the tab shows these with a
 }
 ```
 
+Turns are recorded from the next prompt on. Pick any of the last 20 by their prompt. The
+prompt goes to the model too, so the steps are explained against what was asked.
+
+**When a turn has no clean end.** Stop a turn with Esc, or quit the agent mid-turn, and
+Claude Code sends no Stop. Such a turn ends at your next prompt in that session or
+terminal. If there's no next prompt, the walkthrough freezes the turn once the agent has
+been quiet for 45 seconds (12 hours if it can't tell). It can only see that moment, not the
+one the agent stopped at, so edits you made in between count as the turn's. These turns
+are labelled *"no Stop recorded, ended when seen idle"*, and Auto leaves them for you to
+Generate.
+
+<details>
+<summary>How the hooks work</summary>
+
 [`hooks/turn.sh`](mods/walkthrough/hooks/turn.sh) needs only `sh` and `git`. It runs
 `git add -A && git write-tree` against an index and an object folder of its own under
-`~/.herdr/walkthrough/turns/`, so the repository's index, refs and objects are never
+`~/.herdr/walkthrough/turns/`, so your repository's index, refs and objects are never
 written, not even their modification times. New files over 1 MB are left out, as
-everywhere else. It prints nothing, and any failure is a silent exit 0: it never holds an
-agent up. In a 6,000-file repository a snapshot takes about a second.
+everywhere else, and listed under Not covered. It prints nothing, and any failure is a
+silent exit 0: it never holds an agent up. In a 6,000-file repository a snapshot takes
+about a second.
 
-A turn stopped with Esc, or an agent quit mid-turn, gets no Stop hook from Claude Code.
-Such a turn ends at the next prompt of its session or its terminal (`/clear` starts a
-new session there). The newest one is read up to now while its agent works; once the
-agent has been quiet for 45 seconds (or, with no agent to ask, after 12 hours) its end
-is frozen at that moment, so it stops taking in later edits. The walkthrough can only see
-that moment, not the one the agent stopped at: edits you made in between (or, with the
-walkthrough closed, any time before you open it) count as the turn's. Such a turn is
-listed as "no Stop recorded, ended when seen idle", and Auto leaves it to Generate. New files over 1 MB a turn
-made are listed under Not covered, as everywhere else. Inside
-Herdr each turn records its terminal (`HC_TERMINAL_ID`), so the tab shows the turn of the
-agent you opened it over, and a pane knows which turns are its tab's.
+Inside Herdr each turn records its terminal (`HC_TERMINAL_ID`), so the tab shows the turn
+of the agent you opened it over, and a pane knows which turns are its tab's.
 
-## Updates
+</details>
 
-Herdr updates its own mods, not ones you added: yours is a copy, and nothing tells you
-when this repo changes. To hear about a new version, watch the repo for releases (on
-GitHub: **Watch → Custom → Releases**). Each
-[release](https://github.com/dmazlum/herdr-walkthrough/releases) says what changed and whether
-`keys.json` did; merge it again when it did.
+## Privacy and cost
 
-The version you have is `"version"` in `~/.config/herdr-app/mods/walkthrough/mod.json`. To
-update, ask your agent to replace that folder with the latest `mods/walkthrough` from
-`github.com/dmazlum/herdr-walkthrough`. Adding it again isn't enough: an agent never
-overwrites a mod, it would add a second copy under a new name. If the mod was renamed when
-it was added (a name clash), the renamed folder is the one to replace, renamed the same way.
-Or by hand:
+**Nothing is sent to a model until you press Generate**, except an agent's last turn while
+Auto is on (Haiku only, up to 300 hunks). Nothing is posted anywhere until you press
+**Post** and confirm.
+
+- **Opening the walkthrough only reads git.** On the Pull request tab it also asks `gh` for
+  the open pull requests and the picked one's diff. For local changes and branches it reads
+  what you typed into Claude Code in this repository since the last commit (from
+  `~/.claude/projects/`), to find the task. Tool output, subagents and commands are left out.
+- **A generation is one `claude -p` call** in the background, with no tools, MCP servers,
+  settings, hooks or skills: the model only reads the diff and the task, and answers. That
+  keeps a small change at about $0.002 with Haiku. Each walkthrough shows what it cost.
+- **The task is treated as material, never as instructions,** and at most 6,000 characters
+  of it are sent.
+- **A diff too large for the model** (about 175k tokens) is refused rather than cut: a
+  walkthrough of half a diff would read just as confidently as one of the whole.
+
+<details>
+<summary>What's stored, in <code>~/.herdr/walkthrough/</code></summary>
+
+| Path | What |
+| --- | --- |
+| `entries/<key>.json` | Finished walkthroughs, the newest 200, each with the task it was matched against |
+| `pointers/<place>.json` | The one shown last per repository and tab |
+| `jobs/<place>/` | A generation in progress: its prompt, `run.sh`, and the answer |
+| `turns/<repo>/<turn>/` | The last 20 turns per repository, written by `hooks/turn.sh`: the hook's input, the snapshots' trees, the objects they needed |
+| `read/<repo>.json` | The hunks you've read in a repository, by content, the newest 5,000 |
+| `clipboard.md` | The last walkthrough copied as Markdown |
+| `pr-comment.md` | The last walkthrough posted to a pull request |
+| `preferences.md` | Optional: your own wishes for tone and emphasis, added to every prompt |
+
+A walkthrough written before 0.7.0, for something that now has a task (a commit message, a
+pull request, a turn), is still shown, with a banner offering Regenerate. A walkthrough
+matched against your prompts stays as it is while you keep prompting; its task page says
+when more were sent since.
+
+</details>
+
+## Install by hand
+
+```sh
+git clone https://github.com/dmazlum/herdr-walkthrough
+cp -R herdr-walkthrough/mods/walkthrough ~/.config/herdr-app/mods/
+herdr-app check ~/.config/herdr-app/mods/walkthrough
+```
+
+Then merge [`keys.json`](keys.json) into `~/.config/herdr-app/keys.json` for **⌘⇧K**.
+(Asking your agent does all of this for you: it follows [`RECIPE.md`](RECIPE.md).)
+
+## Updating
+
+Herdr doesn't update mods you added yourself. To hear about new versions, watch this repo
+for releases (**Watch → Custom → Releases**). Each
+[release](https://github.com/dmazlum/herdr-walkthrough/releases) says what changed, and
+whether `keys.json` did.
+
+Your version is `"version"` in `~/.config/herdr-app/mods/walkthrough/mod.json`. To update,
+ask your agent to *replace* that folder with the latest `mods/walkthrough` from
+`github.com/dmazlum/herdr-walkthrough`. Asking it to add the mod again isn't enough: it
+would add a second copy under a new name. Or by hand:
 
 ```sh
 git -C herdr-walkthrough pull          # or clone it again
@@ -180,80 +242,38 @@ cp -R herdr-walkthrough/mods/walkthrough ~/.config/herdr-app/mods/
 herdr-app check ~/.config/herdr-app/mods/walkthrough
 ```
 
-## What it runs
-
-Nothing is generated until you press **Generate**, except an agent's last turn while
-**Auto** is on (with Haiku, up to 300 hunks; see [Last turn](#last-turn)). Opening the walkthrough only reads git
-(and, on the Pull request tab, asks `gh` for the open pull requests, with their
-descriptions, and the picked one's diff). For local changes and branches it also reads
-Claude Code's transcripts of this repository (`~/.claude/projects/`, or
-`$CLAUDE_CONFIG_DIR`), only for what you typed since the last commit or since the branch
-left its base; tool output, subagents and commands are left out. Nothing is posted until
-you press **Post** and confirm.
-
-The task goes to the same `claude -p` call as the diff, between tags the model is told to
-read as material, never as instructions, and at most 6,000 characters of it. A
-walkthrough without a task is asked for exactly as before, and keeps its cache. One
-written before this version for a source that now finds a task (a commit with a message,
-a pull request, a turn) is still shown, with a banner offering Regenerate; Auto doesn't
-write it again unasked. A walkthrough matched against your prompts stays as it is while
-you keep prompting: its task page says when more were sent since.
-
-A generation is one `claude -p` call, in the background, with no tools, no MCP servers, no
-settings, hooks or skills: the model reads the diff and answers in JSON. Without those
-flags a full Claude Code setup rides along on every call; with them a small change costs
-about $0.002 with Haiku. The cost of each walkthrough is shown under its contents.
-
-Everything is kept in `~/.herdr/walkthrough/`:
-
-| Path | What |
-| --- | --- |
-| `entries/<key>.json` | Finished walkthroughs, the newest 200, each with the task it was matched against |
-| `pointers/<place>.json` | The one shown last per repository and scope |
-| `jobs/<place>/` | A generation in progress: its prompt, `run.sh`, and the answer |
-| `turns/<repo>/<turn>/` | The last 20 turns per repository, written by `hooks/turn.sh`: the hook's input, the snapshots' trees, the objects they needed |
-| `read/<repo>.json` | The hunks you've read in a repository, by content, the newest 5,000 |
-| `clipboard.md` | The last walkthrough copied as Markdown |
-| `pr-comment.md` | The last walkthrough posted to a pull request |
-| `preferences.md` | Optional: your own wishes for tone and emphasis, added to every prompt |
-
-A diff too large for the model (about 175k tokens) is refused rather than cut: a
-walkthrough of half a diff reads exactly as confidently as one of the whole.
-
-![An outdated step](docs/outdated.png)
+If the mod was renamed when it was added (a name clash), replace the renamed folder.
 
 ## Limits
 
-- Local only: a space on another machine shows a notice.
-- Claude Code is the only model runner for now (Codex is planned). It must be logged in;
-  `claude --version` must work from the PATH Herdr starts programs with.
-- New files over 1 MB, and new files past the first 300, are listed but not read.
-- Pull requests need the [GitHub CLI](https://cli.github.com) (`gh`), logged in, and a GitHub
-  remote. GitHub sends no diff past about 300 files or 20,000 lines; read such a change as a
-  Branch. A pull request is read again when you pick its tab or it, not while it is open.
-- A page draws at most 2,500 lines of code; the rest is counted.
-- The task is read from Claude Code only: prompts sent to Codex or another agent aren't
-  found (write them as your own task). For local changes it is every prompt typed in this
-  repository since the last commit, whichever agent and session it went to; a commit made
-  mid-task starts it over. Matching is the model's reading: a request marked "not in this
-  diff" may be done in a file the diff doesn't hold, or under another name.
-- Comments are kept while the walkthrough is open, and sent with Enter.
-- Last turn records Claude Code's turns only (other agents have no such hooks yet), and
-  writes walkthroughs without a click only while the walkthrough is open.
-- What you read is written once a second; a mark made in the last second before Herdr quits
-  can be lost.
-- A step counts as changed since you read it when part of it was read, or when a hunk you
-  read in its file, in the walkthrough shown when this one was generated, is gone. Without
-  one shown before, an edited hunk looks like a new one: unread, not changed.
+- **Local only.** A space on another machine shows a notice.
+- **Claude Code only, for now.** It must be logged in, and `claude --version` must work
+  from the PATH Herdr starts programs with. Codex is planned. Comments can already be sent
+  to a Codex agent, or any other.
+- **Big files.** New files over 1 MB, and new files past the first 300, are listed but not
+  read. A page draws at most 2,500 lines of code; the rest is counted.
+- **Pull requests** need the [GitHub CLI](https://cli.github.com) (`gh`), logged in, and a
+  GitHub remote. GitHub sends no diff past about 300 files or 20,000 lines; read such a
+  change as a Branch instead. A pull request is read again when you pick it, not while
+  it's open.
+- **The task** is found from Claude Code only. Prompts sent to other agents aren't, so
+  write them as your own task. For local changes it's every prompt in this repository
+  since the last commit, whichever session it went to; a commit made mid-task starts it
+  over. Matching is the model's reading: "not in this diff" may mean it's done in a file the
+  diff doesn't hold, or under another name.
+- **Last turn** records Claude Code's turns only, and writes walkthroughs without a click
+  only while the walkthrough is open.
+- **Comments** are kept while the walkthrough is open, and sent with Enter.
+- **Read marks** are saved once a second: one made in the last second before Herdr quits
+  can be lost. A step counts as changed since you read it when part of it was read, or when
+  a hunk you read in its file is gone. Without an earlier walkthrough to compare with, an
+  edited hunk looks new: unread, not changed.
 
 ## Roadmap
 
-- **Auto when closed** (`autoGenerate: "on-stop"`). Write a turn's walkthrough when the
-  agent stops, with no walkthrough open, by the Stop hook starting a background run
-  (`node bin/prewarm.mjs`). Planned: it needs the engine's Herdr calls behind an
-  interface that Node can provide.
-- **Codex as a model runner.** Generate a walkthrough with `codex exec` and its JSON schema
-  output, as a choice beside Haiku, Sonnet and Opus.
+- **Auto when closed.** Write a turn's walkthrough the moment the agent stops, even with
+  the walkthrough closed, from the Stop hook.
+- **Codex as a model runner,** beside Haiku, Sonnet and Opus.
 
 ## Development
 
@@ -261,7 +281,17 @@ walkthrough of half a diff reads exactly as confidently as one of the whole.
 npm test    # parsing, hunk ids, digest, prompt, normalizing, staleness, read tracking, tasks and transcripts, Markdown export, syntax colours, gh (faked), turns, and git and turn.sh against real repos
 ```
 
-The UI is checked in Herdr: `herdr-app check`, then `herdr-app shot` while it is open.
+While developing, copy the folder again after each change; Herdr reloads the mod within a
+second. Copy, don't symlink: Herdr doesn't reload a symlinked mod folder.
+
+```sh
+cp -R mods/walkthrough ~/.config/herdr-app/mods/
+```
+
+The UI is checked in Herdr: `herdr-app check`, then `herdr-app shot` while it's open.
+The README's image is [`docs/preview/index.html`](docs/preview/index.html), rendered with
+`sh docs/preview/render.sh` (a headless Chromium).
+[`RECIPE.md`](RECIPE.md) describes every screen and behaviour in full.
 
 ## License
 
