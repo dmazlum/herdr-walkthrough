@@ -170,3 +170,23 @@ export function numberLines(hunk) {
     return { kind: " ", number: next++, text: line.slice(1) };
   });
 }
+
+/**
+ * What a hunk's header says, in words: where it starts in the new file, the
+ * lines skipped since the previous hunk of the same file (null for the
+ * first), and git's context line (the function or class it sits in).
+ * @returns {{ at: string, skipped: number | null, context: string }}
+ */
+export function hunkLabel(hunk, previous = null) {
+  const start = hunk.newLines === 0 ? hunk.oldStart : hunk.newStart;
+  const end = previous ? previous.newStart + previous.newLines : null;
+  const skipped = end === null ? null : Math.max(0, hunk.newStart - end);
+  return { at: `Line ${start}`, skipped: skipped || null, context: hunk.context ?? "" };
+}
+
+/** The digits of the largest line number among these hunks: the line-number column is that wide. */
+export function numberDigits(hunks) {
+  let max = 1;
+  for (const h of hunks) max = Math.max(max, h.oldStart + h.oldLines, h.newStart + h.newLines);
+  return String(max).length;
+}

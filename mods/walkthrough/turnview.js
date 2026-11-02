@@ -173,25 +173,33 @@ export async function autoGenerate(v, cx, turn) {
   cx.notify();
 }
 
-/** The Last turn tab before any turn was recorded: what the hooks do and the settings to add. */
+/** The Last turn tab before any turn was recorded: what the hooks do, and setting them up in three steps. */
 export function hookHelp(v, t) {
-  const snippet = hookSettings(hookScript());
+  // One line per hook, as the README shows them; Copy settings copies exactly what is shown.
+  const snippet = hookSettings(hookScript(), { compact: true });
   const font = settings().font_family ?? "JetBrains Mono";
+  const step = (n, title, ...body) => h_flex().w_full().px(14).py(12).gap(12).items_start().when(n > 1, (e) => e.border_t(1).border_color(t.border))
+    .child(div().flex_none().size(22).rounded(11).bg(t.accent + "26").flex().items_center().justify_center().text_size(11.5).font_semibold().text_color(t.accent).child(String(n)))
+    .child(v_flex().flex_1().min_w(0).gap(6).child(div().text_size(13).font_semibold().child(title)).children(body));
+  const small = (text) => div().text_size(12).line_height(1.5).text_color(t.muted).child(text);
   return v_flex().id("turn-help").size_full().overflow_y_scrollbar().items_center().p(28)
     .child(v_flex().w_full().max_w(620).gap(12)
-      .child(div().text_size(18).font_semibold().child("No turns recorded in this repository yet"))
-      .child(div().text_size(13).text_color(t.muted).child("Last turn reads what an agent changed while answering one prompt. Two Claude Code hooks record it: one takes a snapshot of the working tree when you send a prompt, the other when the agent stops. Snapshots go to ~/.herdr/walkthrough/turns/, never into the repository's .git; the newest 20 per repository are kept."))
-      .child(div().text_size(13).text_color(t.muted).child("Add these to ~/.claude/settings.json, beside any hooks you already have. The walkthrough doesn't change your settings itself. Turns are recorded from the next prompt on."))
-      // A line longer than the box wraps under its own indent instead of spilling out of it; Copy settings copies the text itself.
-      .child(v_flex().w_full().min_w(0).p(10).rounded(8).border_1().border_color(t.border).bg(t.raised).font_family(font).text_size(11.5)
-        .children(snippet.split("\n").map((line) => {
-          const indent = /^ */.exec(line)[0].length;
-          return div().w_full().min_w(0).pl(indent * 7).child(line.trimStart() || " ");
-        })))
-      .child(h_flex().gap(10).items_center()
-        .child(button(t, "copy-hooks", "Copy settings", (_e, cx) => cx.spawn(async (cx) => {
-          try { await copyText(snippet); v.sent = "Copied the hook settings."; } catch (e) { v.sent = `Couldn't copy: ${String(e?.message ?? e)}`; }
-          cx.notify();
-        }), { kind: "solid", small: true }))
-        .when(Boolean(v.sent), (e) => e.child(div().text_size(11.5).text_color(t.dim).child(v.sent)))));
+      .child(div().text_size(18).font_semibold().child("Record the agent's turns"))
+      .child(div().text_size(13).line_height(1.5).text_color(t.muted).child("Last turn shows exactly what an agent changed while answering one prompt. Two Claude Code hooks take a snapshot of your working tree, outside the repository's .git, when you send a prompt and when the agent stops."))
+      .child(v_flex().w_full().rounded(10).border_1().border_color(t.border)
+        .child(step(1, "Copy the two hooks",
+          // A line longer than the box wraps under its own indent instead of spilling out of it.
+          v_flex().w_full().min_w(0).p(10).rounded(8).border_1().border_color(t.border).bg(t.raised).font_family(font).text_size(11)
+            .children(snippet.split("\n").map((line) => {
+              const indent = /^ */.exec(line)[0].length;
+              return div().w_full().min_w(0).pl(indent * 7).child(line.trimStart() || " ");
+            })),
+          h_flex().gap(10).items_center()
+            .child(button(t, "copy-hooks", "Copy settings", (_e, cx) => cx.spawn(async (cx) => {
+              try { await copyText(snippet); v.sent = "✓ Copied"; } catch (e) { v.sent = `Couldn't copy: ${String(e?.message ?? e)}`; }
+              cx.notify();
+            }), { kind: "solid", small: true }))
+            .when(Boolean(v.sent), (e) => e.child(div().text_size(11.5).text_color(v.sent.startsWith("✓") ? t.ansi2 : t.dim).child(v.sent)))))
+        .child(step(2, "Add them to ~/.claude/settings.json", small("Next to any hooks you already have. The walkthrough never edits your settings itself.")))
+        .child(step(3, "Send your agent a prompt", small("Turns are recorded from then on. Snapshots go to ~/.herdr/walkthrough/turns/; the newest 20 per repository are kept.")))));
 }

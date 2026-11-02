@@ -149,6 +149,12 @@ test("the settings snippet is JSON naming both hooks", () => {
   const s = JSON.parse(hookSettings("/x/turn.sh"));
   assert.equal(s.hooks.UserPromptSubmit[0].hooks[0].command, 'sh "/x/turn.sh" start');
   assert.equal(s.hooks.Stop[0].hooks[0].command, 'sh "/x/turn.sh" stop');
+  // One line per hook, as the README shows them: the same settings, even for a path JSON has to escape.
+  for (const script of ["/x/turn.sh", '/a b/"q",: {x}/turn.sh']) {
+    const compact = hookSettings(script, { compact: true });
+    assert.deepEqual(JSON.parse(compact), JSON.parse(hookSettings(script)));
+    assert.equal(compact.split("\n").length, 6);
+  }
 });
 
 // ——— the script ———

@@ -175,8 +175,16 @@ for d in $(ls -1 | grep -E '^[0-9]+-[0-9]+$'); do
 done
 exit 0`;
 
-/** The hooks to add to ~/.claude/settings.json, for a turn.sh at `script`. */
-export function hookSettings(script) {
-  const hook = (event) => [{ hooks: [{ type: "command", command: `sh "${script}" ${event}`, timeout: HOOK_TIMEOUT }] }];
+/**
+ * The hooks to add to ~/.claude/settings.json, for a turn.sh at `script`.
+ * `compact`: one line per hook, as the README shows them; the same JSON.
+ */
+export function hookSettings(script, { compact = false } = {}) {
+  const command = (event) => `sh "${script}" ${event}`;
+  if (compact) {
+    const line = (event) => `[{ "hooks": [{ "type": "command", "command": ${JSON.stringify(command(event))}, "timeout": ${HOOK_TIMEOUT} }] }]`;
+    return `{\n  "hooks": {\n    "UserPromptSubmit": ${line("start")},\n    "Stop": ${line("stop")}\n  }\n}`;
+  }
+  const hook = (event) => [{ hooks: [{ type: "command", command: command(event), timeout: HOOK_TIMEOUT }] }];
   return JSON.stringify({ hooks: { UserPromptSubmit: hook("start"), Stop: hook("stop") } }, null, 2);
 }

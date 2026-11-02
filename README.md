@@ -63,7 +63,7 @@ Each step says which request it serves, and steps no request asked for are liste
 
 You don't have to type the task. It's found for you: the Last turn's prompt, the pull
 request's description, the commit's message, or the prompts you sent to Claude Code since
-the last commit. You can also write your own, or turn it off, from the **Task** menu. It
+the last commit. You can also write your own, or turn it off, from the **Matched against** menu. It
 says *where* a request shows up, never whether it's done well.
 
 ### Honest when the code moves on
@@ -116,8 +116,8 @@ says *where* a request shows up, never whether it's done well.
 
 | Menu / command | What it does |
 | --- | --- |
-| **Task** menu | Found (default), Your own… (write it), or Off; kept per repository and tab |
-| Last turn → **Auto** | While open (default): write the last turn's walkthrough without a click. Off: only on Generate |
+| **Matched against** menu | Found (default), Your own… (write it), or Off; kept per repository and tab |
+| Last turn → **⚡ Auto** | On (default): write the last turn's walkthrough without a click. One click turns it off: only on Generate |
 | `walkthrough.generate`, `.cancel`, `.next`, `.prev`, `.copy`, `.unread`, `.task` | Generate, cancel, move, Copy as Markdown, Unread only and write your own task |
 
 </details>

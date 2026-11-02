@@ -7,7 +7,7 @@ import { spaces, panes, focused, agents, theme, props, closeOverlay, hc, exec, n
 import { SCOPES, repoAt, currentHead, defaultBase, baseChoices, recentCommits, pullRequests, sourceKey, commitMessage, taskSince } from "./lib/sources.js";
 import { overlay, fileTotals, overlayAsks, asksOf } from "./lib/walkthrough.js";
 import { TASK_MODES, taskChoice, resolveTask, taskKey, taskCacheKey, clip, MAX_TASK_CHARS } from "./lib/task.js";
-import { numberLines } from "./lib/hunks.js";
+import { numberLines, hunkLabel, numberDigits } from "./lib/hunks.js";
 import { tokenize } from "./lib/highlight.js";
 import { LANGUAGES, languageOf, fromLocale } from "./lib/languages.js";
 import { MODELS, DEFAULT_MODEL, modelOf } from "./lib/job.js";
@@ -23,6 +23,8 @@ import { AUTO, DEFAULT_AUTO, autoOf, startTurns, loadTurns, turnLabel, turnItems
 const PREFS = "walkthrough.prefs";
 // Lines drawn on one page; a step past this says how many it leaves out.
 const MAX_PAGE_LINES = 2500;
+// The walkthrough's summary is cut past this until "Show more".
+const SUMMARY_CHARS = 150;
 const NOTE_LABEL = { choice: "Decision", upkeep: "Upkeep", gap: "Limitation", divergence: "Divergence", untested: "Untested" };
 const NOTE_ABOUT = {
   choice: "A product or design call made here that could have gone another way",
@@ -90,6 +92,7 @@ export class Walkthrough {
     this.turn = null; // Last turn: the one shown (lib/turns.js), picked by hand when turnPinned
     this.turns = [];
     this.turnPinned = false;
+    this.summaryOpen = false; // the sidebar's summary, shown whole
     this.auto = AUTO.some((a) => a.key === saved.autoGenerate) ? saved.autoGenerate : DEFAULT_AUTO;
     this.autoTried = new Set(); // turns already considered for a walkthrough without a click
     this.autoWanted = null;
@@ -585,9 +588,9 @@ export class Walkthrough {
   /** The task picker's face. */
   taskFace() {
     const mode = this.taskChoiceFor(this.diff?.sk).mode;
-    if (mode === "off") return "Task: off";
-    if (!this.task) return "Task: none";
-    return `Task: ${this.task.short}`;
+    if (mode === "off") return "nothing (off)";
+    if (!this.task) return "nothing found";
+    return `◎ ${this.task.short}`;
   }
 
   choose(kind, value, cx) {
@@ -761,21 +764,32 @@ export class Walkthrough {
       ? button(t, "cancel", "Cancel", (_e, cx) => cx.spawn(async (cx) => this.cancel(cx)), { small: true })
       : button(t, "generate", this.shown?.exact ? "Regenerate" : "Generate", (_e, cx) => cx.spawn(async (cx) => this.generate(cx)),
         { kind: this.shown?.exact ? "outline" : "solid", small: true, disabled: !this.canGenerate(), tooltip: this.claude === null ? "claude isn't installed" : null });
-    return h_flex().min_h(42).flex_none().px(14).py(7).gap(8).items_center().flex_wrap().border_b(1).border_color(t.border)
+    // Above: what to read, and the one action. Below: which one of it (left), and how it is written (right).
+    const top = h_flex().min_h(42).flex_none().px(14).py(7).gap(8).items_center().flex_wrap().border_b(1).border_color(t.border)
       .child(tabs)
-      .when(this.scope === "branch", (el) => el.child(div().text_size(11.5).text_color(t.dim).child("vs"))
-        .child(picker(t, "pick-base", this.base ?? "Pick a base", open("base"))))
-      .when(this.scope === "commit", (el) => el.child(picker(t, "pick-commit", this.commit ? `${this.commit.short} ${this.commit.subject}` : "Pick a commit", open("commit"))))
-      .when(this.scope === "pr" && Boolean(this.prs?.length), (el) => el.child(picker(t, "pick-pr", this.pr ? `#${this.pr.number} ${this.pr.title}` : "Pick a pull request", open("pr"))))
-      .when(this.scope === "turn" && this.turns.length > 0, (el) => el.child(picker(t, "pick-turn", turnLabel(this), open("turn")))
-        .child(picker(t, "pick-auto", `Auto: ${autoOf(this.auto).name.toLowerCase()}`, open("auto"), { tooltip: "Write the last turn's walkthrough without a click" })))
       .child(div().flex_1())
       .when(this.loading, (el) => el.child(div().text_size(11).text_color(t.dim).frames(["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"], 90)))
-      .when(Boolean(this.diff), (el) => el.child(picker(t, "pick-task", this.taskFace(), open("task"),
-        { tooltip: this.task ? `Matched against ${this.task.label.charAt(0).toLowerCase()}${this.task.label.slice(1)}` : "What the change is matched against" })))
-      .child(picker(t, "pick-model", modelOf(this.model).name, open("model"), { tooltip: "Model" }))
-      .child(picker(t, "pick-language", languageOf(this.language).name, open("language"), { tooltip: "Language of the explanations" }))
       .child(action);
+    const label = (text) => div().flex_none().text_size(11).text_color(t.dim).child(text);
+    const auto = this.auto !== "off";
+    const which = h_flex().flex_1().min_w(0).gap(8).items_center()
+      .when(this.scope === "branch", (el) => el.child(label("vs")).child(picker(t, "pick-base", this.base ?? "Pick a base", open("base"))))
+      .when(this.scope === "commit", (el) => el.child(picker(t, "pick-commit", this.commit ? `${this.commit.short} ${this.commit.subject}` : "Pick a commit", open("commit"))))
+      .when(this.scope === "pr" && Boolean(this.prs?.length), (el) => el.child(picker(t, "pick-pr", this.pr ? `#${this.pr.number} ${this.pr.title}` : "Pick a pull request", open("pr"))))
+      .when(this.scope === "turn" && this.turns.length > 0, (el) => el.child(label("Turn")).child(picker(t, "pick-turn", turnLabel(this), open("turn")))
+        .child(button(t, "toggle-auto", auto ? "⚡ Auto: on" : "Auto: off", (_e, cx) => { this.choose("auto", auto ? "off" : DEFAULT_AUTO, cx); }, {
+          kind: "ghost", small: true,
+          tooltip: auto ? `${autoOf(this.auto).about}. Click to turn it off.` : "Only when you press Generate. Click to write the last turn's walkthrough without a click.",
+        })));
+    const how = h_flex().flex_none().gap(8).items_center()
+      .when(Boolean(this.diff), (el) => el.child(label("Matched against")).child(picker(t, "pick-task", this.taskFace(), open("task"),
+        { tooltip: this.task ? `Matched against ${this.task.label.charAt(0).toLowerCase()}${this.task.label.slice(1)}` : "What the change is matched against" })))
+      .child(h_flex().flex_none().items_center().rounded(6).border_1().border_color(t.border)
+        .child(picker(t, "pick-model", modelOf(this.model).name, open("model"), { tooltip: "Model", kind: "ghost" }))
+        .child(div().w(1).h(14).bg(t.border))
+        .child(picker(t, "pick-language", languageOf(this.language).name, open("language"), { tooltip: "Language of the explanations", kind: "ghost" })));
+    const below = h_flex().min_h(36).flex_none().px(14).py(5).gap(8).items_center().border_b(1).border_color(t.border).child(which).child(how);
+    return v_flex().flex_none().child(top).child(below);
   }
 
   canGenerate() {
@@ -790,7 +804,6 @@ export class Walkthrough {
       case "pr": return { side: "left", width: 480, items: (this.prs ?? []).map((p) => ({
         label: `#${p.number}  ${p.title}`, hint: `${p.author} · ${p.head} → ${p.base}${p.draft ? " · draft" : ""}${p.current ? " · this branch" : ""}`, value: p, selected: p.number === this.pr?.number })) };
       case "turn": return { side: "left", width: 480, items: turnItems(this) };
-      case "auto": return { side: "left", width: 340, items: AUTO.map((a) => ({ label: a.name, hint: a.about, value: a.key, selected: a.key === this.auto })) };
       case "task": {
         const choice = this.taskChoiceFor(this.diff?.sk);
         const hint = (m) => {
@@ -847,19 +860,40 @@ export class Walkthrough {
   }
 
   body(t) {
-    const center = (...lines) => v_flex().size_full().items_center().justify_center().gap(8).p(24)
-      .children(lines.map((l, i) => (typeof l === "string" ? div().max_w(560).text_center().text_size(i === 0 ? 14 : 12.5).text_color(i === 0 ? t.foreground : t.dim).child(l) : l)));
-    if (this.remote) return center("This space is on another machine.", "Walkthroughs read git and run claude on this computer only.");
+    // An empty state: an icon (none while something is only being read), what is going on, why, and what to do instead.
+    const center = (title, text = "", { icon = null, color = null, actions = [] } = {}) => v_flex().size_full().items_center().justify_center().gap(8).p(24)
+      .when(Boolean(icon), (e) => e.child(div().mb(6).size(44).rounded(12).border_1().border_color(t.border).bg(t.raised).flex().items_center().justify_center()
+        .text_size(19).text_color(color ?? t.muted).child(icon)))
+      .child(div().max_w(560).text_center().text_size(14).text_color(icon ? t.foreground : t.muted).child(title))
+      .when(Boolean(text), (e) => e.child(div().max_w(560).text_center().text_size(12.5).line_height(1.5).text_color(t.dim).child(text)))
+      .when(actions.length > 0, (e) => e.child(h_flex().mt(8).gap(8).items_center().children(actions)));
+    const goTo = (key, label) => button(t, `go-${key}`, label, (_e, cx) => this.pickScope(key, cx), { kind: "ghost", small: true });
+    if (this.remote) return center("This space is on another machine", "Walkthroughs read git and run claude on this computer only.", { icon: "⇄" });
     if (this.repo === undefined) return center("Reading…");
-    if (this.repo === null) return center("Not a git repository.", this.folder ? `Nothing to walk through in ${this.folder}.` : "Focus a terminal in a repository, then open the walkthrough again.");
-    if (this.error) return center("Couldn't read the diff.", this.error);
-    if (this.scope === "pr" && this.prError) return center("Couldn't list the pull requests.", this.prError);
+    if (this.repo === null) return center("Not a git repository", this.folder ? `Nothing to walk through in ${this.folder}.` : "Focus a terminal in a repository, then open the walkthrough again.", { icon: "⎇" });
+    if (this.error) return center("Couldn't read the diff", this.error, { icon: "!", color: t.ansi1 });
+    if (this.scope === "pr" && this.prError) return center("Couldn't list the pull requests", this.prError, { icon: "!", color: t.ansi1, actions: [goTo("branch", "Read it as a Branch")] });
     if (this.scope === "pr" && this.prs === null) return center("Reading the pull requests…");
-    if (this.scope === "pr" && !this.prs.length) return center("No open pull requests.", "This repository has none open on GitHub.");
+    if (this.scope === "pr" && !this.prs.length) return center("No open pull requests", "This repository has none open on GitHub.", { icon: "#", actions: [goTo("branch", "Branch"), goTo("uncommitted", "Uncommitted")] });
     if (this.scope === "turn" && !this.turns.length) return hookHelp(this, t);
-    if (!this.source()) return center(this.scope === "branch" ? "Pick the branch to compare with." : this.scope === "pr" ? "Pick a pull request." : "Pick a commit.", "Nothing is read or generated until you do.");
+    if (!this.source()) return center(this.scope === "branch" ? "Pick the branch to compare with" : this.scope === "pr" ? "Pick a pull request" : "Pick a commit", "Nothing is read or generated until you do.", { icon: "◇" });
     if (!this.diff) return center("Reading the diff…");
-    if (!this.diff.files.length) return center("Nothing to walk through.", this.scope === "turn" ? (this.turn && isOpen(this.turn) ? "This turn hasn't changed any files yet." : "This turn changed no files.") : `No ${SCOPES.find((s) => s.key === this.scope)?.label.toLowerCase()} changes${this.scope === "branch" ? ` against ${this.base}` : ""}.`);
+    if (!this.diff.files.length) {
+      if (this.scope === "turn") {
+        const open = this.turn && isOpen(this.turn);
+        return center(open ? "Nothing to walk through yet" : "This turn changed no files", open ? "This turn hasn't changed any files. It's read up to now while the agent works." : "The working tree is the same at its end as at its start.", {
+          icon: "↺",
+          actions: [
+            ...(this.turns.length > 1 ? [picker(t, "empty-turns", "Other turns", (_e, cx) => { this.togglePicker("turn"); cx.notify(); })] : []),
+            goTo("uncommitted", "Uncommitted"),
+          ],
+        });
+      }
+      return center("Nothing to walk through", `No ${SCOPES.find((s) => s.key === this.scope)?.label.toLowerCase()} changes${this.scope === "branch" ? ` against ${this.base}` : ""}.`, {
+        icon: "✓", color: t.ansi2,
+        actions: this.scope === "uncommitted" ? [goTo("branch", "Branch"), ...(this.turns.length ? [goTo("turn", "Last turn")] : [])] : [goTo("uncommitted", "Uncommitted")],
+      });
+    }
     if (!this.view) return this.job ? this.progress(t) : this.intro(t);
     // A narrow pane gives the page the room; the footer still moves between steps.
     return h_flex().size_full().items_start()
@@ -961,8 +995,11 @@ export class Walkthrough {
             .child(div().text_size(11.5).text_color(t.ansi1).child(deleted ? `−${deleted}` : ""))))));
   }
 
+  /** A message in a tinted box with a coloured edge; `t.muted` makes it a quiet, grey one. */
   notice(t, color, text) {
-    return div().w_full().px(10).py(7).rounded(7).border_1().border_color(color).text_size(12).text_color(color === t.muted ? t.muted : t.foreground).child(text);
+    const quiet = color === t.muted;
+    return div().w_full().pl(11).pr(10).py(7).rounded(7).border_l(3).border_color(quiet ? t.border : color).bg(quiet ? t.raised : color + "14")
+      .text_size(12).line_height(1.5).text_color(quiet ? t.muted : t.foreground).child(text);
   }
 
   /** A generation running with nothing to show yet. */
@@ -983,18 +1020,25 @@ export class Walkthrough {
 
   banners(t) {
     const out = [];
-    const bar = (id, color, text, action) => h_flex().id(id).flex_none().mx(16).mt(10).px(10).py(6).gap(10).items_center().rounded(7).border_1().border_color(color)
-      .child(div().flex_1().min_w(0).text_size(12).child(text)).when(Boolean(action), (e) => e.child(action));
+    // One shape for every banner: a coloured edge and tint, an icon, what happened, then (dimmer) the detail.
+    // `color` null: a quiet, grey one.
+    const bar = (id, color, icon, text, action, detail = "") => h_flex().id(id).flex_none().mx(16).mt(10).pl(10).pr(8).py(6).gap(10).items_center().rounded(8)
+      .border_l(3).border_color(color ?? t.border).bg(color ? color + "14" : t.raised)
+      .child(div().flex_none().size(18).rounded(9).flex().items_center().justify_center().text_size(10.5).font_semibold()
+        .bg(color ? color + "29" : t.hover).text_color(color ?? t.muted).child(icon))
+      .child(div().flex_1().min_w(0).text_size(12).line_height(1.5)
+        .child(text).when(Boolean(detail), (e) => e.child(div().text_size(11.5).text_color(t.muted).child(detail))))
+      .when(Boolean(action), (e) => e.child(action));
     const regen = (label) => button(t, `banner-${label}`, label, (_e, cx) => cx.spawn(async (cx) => this.generate(cx)), { small: true, disabled: !this.canGenerate() });
     if (this.job) {
-      out.push(bar("b-job", t.accent, `Writing a new walkthrough with ${modelOf(this.job.meta.model).name}… ${formatElapsed(Date.now() - this.job.meta.started)}`,
+      out.push(bar("b-job", t.accent, "…", `Writing a new walkthrough with ${modelOf(this.job.meta.model).name}… ${formatElapsed(Date.now() - this.job.meta.started)}`,
         button(t, "b-cancel", "Cancel", (_e, cx) => cx.spawn(async (cx) => this.cancel(cx)), { small: true })));
     }
-    if (this.genError) out.push(bar("b-error", t.ansi1, this.genError, null));
+    if (this.genError) out.push(bar("b-error", t.ansi1, "!", this.genError, null));
     const changed = this.changedSteps();
     if (changed.length) {
       const n = changed.length;
-      out.push(bar("b-changed", t.accent, `${n === 1 ? "1 step" : `${n} steps`} changed since you last read ${n === 1 ? "it" : "them"}.`,
+      out.push(bar("b-changed", t.accent, "↻", `${n === 1 ? "1 step" : `${n} steps`} changed since you last read ${n === 1 ? "it" : "them"}.`,
         button(t, "b-changed-go", "Go →", (_e, cx) => {
           // Each press goes on to the next one, then round to the first.
           this.go((changed.find((st) => st.position - 1 > this.step) ?? changed[0]).position - 1);
@@ -1005,7 +1049,7 @@ export class Walkthrough {
     if (e && !this.shown.exact && !this.job) {
       const otherModel = e.model !== this.model, otherLanguage = e.language !== this.language;
       if (otherModel || otherLanguage) {
-        out.push(bar("b-other", t.border, `Showing the ${languageOf(e.language).name} walkthrough by ${modelOf(e.model).name}. There's none in ${languageOf(this.language).name} by ${modelOf(this.model).name} for this code yet.`, regen("Generate")));
+        out.push(bar("b-other", null, "i", `Showing the ${languageOf(e.language).name} walkthrough by ${modelOf(e.model).name}. There's none in ${languageOf(this.language).name} by ${modelOf(this.model).name} for this code yet.`, regen("Generate")));
       } else {
         const n = this.view.outdated, fresh = this.view.uncovered.reduce((s, u) => s + u.hunks.length, 0);
         // Same code, other key: it was written for another task, under other preferences, or by an older version of this mod.
@@ -1015,10 +1059,10 @@ export class Walkthrough {
           : !e.task ? "This walkthrough was written without a task. Regenerate to match the change against it."
           : !this.task ? "This walkthrough was matched against a task that is now off or gone."
           : "The task has changed since this walkthrough was matched against it.";
-        if (e.code && e.code === codeKey(this.diff.files)) out.push(bar("b-prefs", t.border, why, regen("Regenerate")));
-        else out.push(bar("b-stale", t.blocked, n
-          ? `Written for an earlier state of this code: ${n === 1 ? "1 step describes" : `${n} steps describe`} code that has changed or is gone.`
-          : `The code changed after this walkthrough was written. ${fresh} hunk${fresh === 1 ? " is" : "s are"} listed under Not covered.`, regen("Regenerate")));
+        if (e.code && e.code === codeKey(this.diff.files)) out.push(bar("b-prefs", null, "i", why, regen("Regenerate")));
+        else out.push(bar("b-stale", t.blocked, "!", "The code moved on since this walkthrough was written.", regen("Regenerate"), n
+          ? `${n === 1 ? "1 step describes" : `${n} steps describe`} code that has changed or is gone.`
+          : `${fresh} new hunk${fresh === 1 ? " is" : "s are"} listed under Not covered.`));
       }
     }
     return out;
@@ -1044,11 +1088,23 @@ export class Walkthrough {
         .when(!s.outdated && (!isRead(s, this.read) || i === this.step), (e) => e.bg(changed.has(s.id) ? t.accent + "29" : t.raised)
           .text_color(changed.has(s.id) ? t.accent : t.muted).child(String(s.position))))
       .when(changed.has(s.id), (e) => e.tooltip("Changed since you last read it"))
-      .child(div().flex_1().min_w(0).truncate().text_size(12.5).when(s.weight === "skim", (e) => e.text_color(t.muted)).child(s.title))
-      .when(s.weight === "key", (e) => e.child(div().flex_none().size(6).rounded(3).bg(t.accent).tooltip("Key change")));
+      // A step read and left behind fades; one to skim is quieter than one to read.
+      .child(div().flex_1().min_w(0).truncate().text_size(12.5)
+        .when(isRead(s, this.read) && i !== this.step, (e) => e.text_color(t.dim))
+        .when(!(isRead(s, this.read) && i !== this.step) && s.weight === "skim", (e) => e.text_color(t.muted)).child(s.title))
+      .when(s.weight === "key", (e) => e.child(div().flex_none().px(4).h(15).flex().items_center().rounded(4).border_1().border_color(t.accent + "55")
+        .text_size(9.5).font_semibold().text_color(t.accent).tooltip("Key change: the rest depends on it").child("KEY")));
+    const total = v.steps.length, done = v.steps.filter((s) => isRead(s, this.read)).length;
+    // The summary is cut to its first few lines until asked for; the steps stay in view.
+    const long = (w.summary ?? "").length > SUMMARY_CHARS;
     return v_flex().id("contents").w(248).flex_none().h_full().overflow_y_scrollbar().border_r(1).border_color(t.border).p(10).gap(2)
       .child(div().px(8).pt(2).text_size(13.5).font_semibold().child(w.title))
-      .when(Boolean(w.summary), (e) => e.child(div().px(8).pt(4).pb(6).text_size(12).line_height(1.5).text_color(t.muted).child(w.summary)))
+      .when(Boolean(w.summary), (e) => e.child(div().px(8).pt(4).text_size(12).line_height(1.5).text_color(t.muted)
+        .child(long && !this.summaryOpen ? clip(w.summary, SUMMARY_CHARS) : w.summary)))
+      .when(long, (e) => e.child(div().id("summary-more").px(8).pt(2).text_size(11.5).text_color(t.accent).cursor_pointer()
+        .on_click((_e, cx) => { this.summaryOpen = !this.summaryOpen; cx.notify(); }).child(this.summaryOpen ? "Show less" : "Show more")))
+      .child(div().mt(10).mx(8).h(3).rounded(2).bg(t.raised).child(div().h_full().rounded(2).bg(t.ansi2).w(Math.round(212 * (total ? done / total : 0)))))
+      .child(div().px(8).pt(4).text_size(11).text_color(t.dim).child(`${done} of ${total} read`))
       .when(this.unreadOnly, (e) => e.child(h_flex().px(8).pt(8).gap(6).items_center().text_size(11).text_color(t.accent)
         .child(div().child("Unread only")).child(div().text_color(t.dim).child("· u shows all"))))
       .when(Boolean(this.taskView), (e) => {
@@ -1064,7 +1120,9 @@ export class Walkthrough {
           .child(div().text_size(11).text_color(tv.met < tv.total ? t.ansi3 : t.dim).child(tv.total ? `${tv.met} / ${tv.total}` : "—")));
       })
       .children(parts.flatMap(({ part, steps }) => [
-        div().px(8).pt(12).pb(3).text_size(10).font_semibold().text_color(t.dim).child(part.title.toUpperCase()),
+        h_flex().px(8).pt(12).pb(3).gap(8).items_center().text_size(10).font_semibold().text_color(t.dim)
+          .child(div().flex_1().min_w(0).truncate().child(part.title.toUpperCase()))
+          .child(div().flex_none().child(`${part.steps.filter((s) => isRead(s, this.read)).length} / ${part.steps.length}`)),
         ...steps.map((s) => stepRow(s, s.position - 1)),
       ]))
       .when(this.unreadOnly && !parts.length, (e) => e.child(div().px(8).pt(12).text_size(12).text_color(t.muted).child("Every step is read.")))
@@ -1115,12 +1173,11 @@ export class Walkthrough {
       .child(div().max_w(820).text_size(13.5).line_height(1.6).child(s.text))
       .when(s.notes.length > 0, (e) => e.child(v_flex().w_full().max_w(820).gap(6).children(s.notes.map((n) =>
         h_flex().w_full().gap(8).items_start().child(chip(t, NOTE_LABEL[n.kind], t.blocked, t.blocked + "12").tooltip(NOTE_ABOUT[n.kind])).child(div().flex_1().min_w(0).pt(1).text_size(12.5).line_height(1.5).text_color(t.muted).child(n.text))))))
-      .when(s.outdated, (e) => e.child(this.notice(t, t.blocked, s.found.length
-        ? `${s.missing} of the ${s.missing + s.found.length} hunks this step described changed or are gone; what's left is below.`
-        : "Every hunk this step described has changed or is gone. Regenerate to read the code as it is now.")))
-      .when(s.found.length > 0, (e) => e.child(h_flex().gap(10).flex_wrap().text_size(11.5).text_color(t.dim).children(fileTotals(s.found).map((f) =>
-        h_flex().gap(4).child(div().child(f.path)).child(div().text_color(t.ansi2).child(f.added ? `+${f.added}` : "")).child(div().text_color(t.ansi1).child(f.deleted ? `−${f.deleted}` : ""))))))
-      .child(this.code(t, s.found));
+      // The banner above and the Outdated chip say it already; this says how much.
+      .when(s.outdated, (e) => e.child(h_flex().gap(6).items_center().flex_wrap().text_size(12)
+        .child(div().font_semibold().text_color(t.blocked).child(s.found.length ? `${s.missing} of ${s.missing + s.found.length} hunks` : "Every hunk"))
+        .child(div().text_color(t.muted).child(s.found.length ? "changed or gone · what's left is below" : "this step described changed or is gone · regenerate to read the code as it is now"))))
+      .when(s.found.length > 0, (e) => e.child(this.code(t, s.found)));
   }
 
   /** Everything no step covers, file by file, each with the model's one-line note. */
@@ -1167,25 +1224,39 @@ export class Walkthrough {
       if (scopes.has(file.path) && scopes.get(file.path) !== file.scope) twice.add(file.path);
       scopes.set(file.path, file.scope);
     }
+    // The line-number column is as wide as the largest number here needs.
+    const numbers = numberDigits(found.map((f) => f.hunk)) * 7 + 8;
+    const totals = new Map(fileTotals(found).map((f) => [f.path, f]));
+    let previous = null;
     for (const { hunk, file } of found) {
       // Past the cap nothing more is drawn, headers included; the lines left are counted.
       if (lines >= MAX_PAGE_LINES) { cut += hunk.lines.length; continue; }
       const name = `${file.scope}:${file.path}`;
-      if (headers && name !== last) {
+      const opened = headers && name !== last;
+      if (opened) {
+        const sum = totals.get(file.path);
         rows.push(h_flex().mt(rows.length ? 10 : 0).h(28).px(12).gap(8).items_center().bg(t.raised).border_b(1).border_color(t.border)
           .child(div().flex_1().min_w(0).truncate().text_size(12).font_semibold().child(file.path))
           .when(twice.has(file.path) || (file.scope === "staged" && this.scope === "uncommitted"), (e) => e.child(chip(t, scopeName(file.scope))))
-          .when(file.status !== "modified", (e) => e.child(div().text_size(11).text_color(t.dim).child(file.oldPath ? `${file.status} from ${file.oldPath}` : file.status))));
+          .when(file.status !== "modified", (e) => e.child(div().text_size(11).text_color(t.dim).child(file.oldPath ? `${file.status} from ${file.oldPath}` : file.status)))
+          .when(Boolean(sum?.added), (e) => e.child(div().text_size(11.5).text_color(t.ansi2).child(`+${sum.added}`)))
+          .when(Boolean(sum?.deleted), (e) => e.child(div().text_size(11.5).text_color(t.ansi1).child(`−${sum.deleted}`))));
       }
+      // Where the hunk is, in words, instead of git's @@ line: lines skipped since the last one of its file, its line, its function.
+      const label = hunkLabel(hunk, name === last ? previous : null);
       last = name;
+      previous = hunk;
       // Without headers (Not covered), a hunk not read yet says so.
       const fresh = !headers && !hunkRead(hunk.id, this.read);
-      rows.push(div().h(20).px(10).flex().items_center().bg(fresh ? t.accent + "1f" : t.hover).text_color(fresh ? t.accent : t.dim).text_size(11).font_family(font).truncate()
-        .child(fresh ? `● ${hunk.header}` : hunk.header));
+      rows.push(h_flex().h(22).px(10).gap(8).items_center().when(rows.length > 0 && !opened, (e) => e.border_t(1).border_color(t.border))
+        .bg(fresh ? t.accent + "1f" : t.hover).text_size(11).text_color(fresh ? t.accent : t.dim).tooltip(hunk.header)
+        .when(fresh, (e) => e.child(div().flex_none().child("●")))
+        .child(div().flex_none().child(label.skipped ? `⋯ ${label.skipped} line${label.skipped === 1 ? "" : "s"} · ${label.at}` : label.at))
+        .when(Boolean(label.context), (e) => e.child(div().flex_1().min_w(0).truncate().font_family(font).text_color(fresh ? t.accent : t.muted).child(label.context))));
       for (const line of numberLines(hunk)) {
         if (lines >= MAX_PAGE_LINES) { cut++; continue; }
         lines++;
-        rows.push(this.line(t, file, line, font));
+        rows.push(this.line(t, file, line, font, numbers));
         if (line.kind === "meta") continue;
         const spot = this.spot(file, line.number, line.kind === "-" ? "-" : "+");
         const c = this.comments.find((x) => sameSpot(x, spot));
@@ -1197,13 +1268,15 @@ export class Walkthrough {
     return v_flex().w_full().flex_none().rounded(8).border_1().border_color(t.border).overflow_hidden().children(rows);
   }
 
-  line(t, file, { kind, number, text }, font) {
+  line(t, file, { kind, number, text }, font, numbers = 44) {
     if (kind === "meta") return div().h(20).px(10).flex().items_center().text_size(11).text_color(t.dim).font_family(font).child(text);
     const side = kind === "-" ? "-" : "+";
     const spot = this.spot(file, number, side);
     const selected = this.target && sameSpot(this.target, spot);
+    // An added or removed line has a coloured edge as well as its tint, so the change reads at a glance.
     return h_flex().id(`l-${file.scope}:${file.path}-${side}${number}`).h(20).w_full().gap(8).font_family(font).text_size(11.5).cursor_pointer()
-      .when(kind === "+", (e) => e.bg(t.ansi2 + "1a")).when(kind === "-", (e) => e.bg(t.ansi1 + "1a"))
+      .border_l(2).border_color(kind === "+" ? t.ansi2 : kind === "-" ? t.ansi1 : "#00000000")
+      .when(kind === "+", (e) => e.bg(t.ansi2 + "14")).when(kind === "-", (e) => e.bg(t.ansi1 + "14"))
       .when(Boolean(selected), (e) => e.bg(t.selection))
       .hover((s) => s.bg(t.hover))
       .on_click((_e, cx) => {
@@ -1213,7 +1286,7 @@ export class Walkthrough {
         this.input.focus();
         cx.notify();
       })
-      .child(div().w(44).flex_none().text_right().text_color(t.dim).child(String(number)))
+      .child(div().w(numbers).flex_none().text_right().text_color(t.dim).child(String(number)))
       .child(div().w(10).flex_none().text_color(kind === "+" ? t.ansi2 : kind === "-" ? t.ansi1 : t.dim).child(kind === " " ? "" : kind))
       .child(h_flex().flex_1().min_w(0).whitespace_nowrap().overflow_hidden().children(text
         ? tokenize(text, file.path).map((tok) => div().flex_none().text_color(syntaxColor(t, tok.kind)).child(tok.text))
