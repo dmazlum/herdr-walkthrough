@@ -13,7 +13,8 @@ import { MODELS, DEFAULT_MODEL, modelOf } from "./lib/job.js";
 import { estimateTokens, codeKey, MAX_PROMPT_CHARS } from "./lib/cache.js";
 import { formatComments, addComment, sameSpot } from "./lib/comments.js";
 import { toMarkdown } from "./lib/export.js";
-import { readDiff, readPreferences, matters, keyFor, findShown, preparePrompt, fits, promptChars, jobOf, startJob, alive, finished, cancelJob, finishJob, copyText, postComment, claudeVersion, systemLocale, ensureDirs } from "./engine.js";
+import { readKey, hunkRead, isRead, markStep, unmarkStep, mergeRead, changedSince } from "./lib/read.js";
+import { readDiff, readPreferences, matters, keyFor, findShown, preparePrompt, fits, promptChars, jobOf, startJob, alive, finished, cancelJob, finishJob, copyText, postComment, claudeVersion, systemLocale, ensureDirs, loadRead, saveRead } from "./engine.js";
 import { button, chip, menu, picker, formatElapsed, formatTokens } from "./ui.js";
 
 const PREFS = "walkthrough.prefs";
@@ -89,7 +90,9 @@ export class Walkthrough {
     this.error = null;
     this.genError = null;
     this.step = 0; // index into view.steps; steps.length is the "Not covered" page
-    this.visited = new Set();
+    this.read = {}; // the repository's read hunks, { "<path>:<digest>": ms }
+    this.readChanged = new Set(); // keys marked or unmarked here and not yet written
+    this.unreadOnly = false; // the contents and ← → skip read steps
     this.openFiles = new Set();
     this.comments = [];
     this.target = null; // { sk, scope, path, line, kind, code }: the line a comment is being written on
@@ -116,6 +119,7 @@ export class Walkthrough {
       if (!this.language) this.language = fromLocale(locale);
       if (!repo) { cx.notify(); return; }
       await ensureDirs();
+      this.read = await loadRead(repo.top);
       const [base, bases, commits] = await Promise.all([
         defaultBase(exec, repo.top, repo.branch), baseChoices(exec, repo.top, repo.branch), recentCommits(exec, repo.top)]);
       const remembered = prefs().bases?.[repo.top];
@@ -128,15 +132,16 @@ export class Walkthrough {
       this.watch(cx);
     });
     cx.timer.every(1000, (cx) => this.tick(cx));
-    // Commands for keys.json: walkthrough.generate, .cancel, .next, .prev, .copy.
+    // Commands for keys.json: walkthrough.generate, .cancel, .next, .prev, .copy, .unread.
     cx.spawn(async (cx) => {
       for (;;) {
         const name = String(await nextCommand()).replace(/^walkthrough\./, "").split(":")[0];
         if (name === "generate") await this.generate(cx);
         else if (name === "cancel") await this.cancel(cx);
-        else if (name === "next") this.go(this.step + 1);
-        else if (name === "prev") this.go(this.step - 1);
+        else if (name === "next") this.move(1);
+        else if (name === "prev") this.move(-1);
         else if (name === "copy") await this.copy(cx);
+        else if (name === "unread") this.unreadOnly = !this.unreadOnly;
         cx.notify();
       }
     });
@@ -173,8 +178,10 @@ export class Walkthrough {
         const diff = await readDiff(repo, source);
         const preferences = await readPreferences();
         const key = keyFor(repo, diff, this.model, this.language, preferences);
-        const [shown, job] = await Promise.all([findShown(repo, diff, key), jobOf(repo, diff.sk)]);
+        const [shown, job, read] = await Promise.all([findShown(repo, diff, key), jobOf(repo, diff.sk), loadRead(repo.top)]);
         if (seq !== this.seq) return;
+        // Another window on this repository may have marked hunks; marks made here and not yet written stay.
+        this.read = mergeRead(read, this.read, this.readChanged);
         // The size of exactly the prompt Generate would send, so the intro and the check agree.
         this.promptSize = promptChars(preparePrompt(diff, { language: this.language, previous: this.previousFor(shown), preferences }));
         const before = this.shown?.entry?.key + String(this.shown?.entry?.generatedAt);
@@ -186,10 +193,10 @@ export class Walkthrough {
         // A job this view started or ended while reading is newer than what the read found.
         if (jobSeq === this.jobSeq && !this.starting) this.job = job;
         this.view = shown ? overlay(shown.entry.walkthrough, diff.files) : null;
-        // Another walkthrough is another reading path: what was visited in the old one means nothing here.
+        // Another walkthrough is another reading path: it opens on its first step not yet read.
         if (before !== shown?.entry?.key + String(shown?.entry?.generatedAt)) {
-          this.step = 0;
-          this.visited = new Set(this.view?.steps.length ? [this.view.steps[0].id] : []);
+          const first = this.view?.steps.findIndex((st) => !isRead(st, this.read)) ?? -1;
+          this.step = Math.max(0, first);
           this.openFiles = new Set();
         }
         if (this.view) this.step = Math.min(this.step, this.view.steps.length);
@@ -233,6 +240,8 @@ export class Walkthrough {
     if (this.ticking || !this.repo) return;
     this.ticking = true;
     try {
+      // Marks are written at most once a second, together.
+      await this.flushRead();
       // Every second only the answer is looked for; whether the run is alive, every fifth.
       const check = this.job && !this.job.done && (++this.polls % 5 === 0 || this.deadSince);
       const done = this.job && !this.job.done ? await finished(this.job) : null;
@@ -285,6 +294,19 @@ export class Walkthrough {
     }
   }
 
+  async flushRead() {
+    if (!this.readChanged.size) return;
+    const keys = [...this.readChanged];
+    this.readChanged = new Set();
+    try {
+      const written = await saveRead(this.repo.top, this.read, keys);
+      // Marks made while it was written are laid over what was written.
+      this.read = mergeRead(written, this.read, this.readChanged);
+    } catch {
+      for (const k of keys) this.readChanged.add(k);
+    }
+  }
+
   setJob(job) {
     this.job = job;
     this.jobSeq++;
@@ -321,7 +343,9 @@ export class Walkthrough {
     try {
       // The key of exactly what is sent, not of whatever the last read saw.
       const key = keyFor(repo, diff, model, language, preferences);
-      this.setJob(await startJob(repo, diff, { key, model, language, prompt, source }));
+      // The hunks of what is shown now: whatever of them was read and is gone has changed since.
+      const before = (this.shown?.entry.walkthrough.parts ?? []).flatMap((p) => p.steps.flatMap((st) => st.hunkIds));
+      this.setJob(await startJob(repo, diff, { key, model, language, prompt, source, before }));
     } catch (err) {
       this.genError = `Couldn't start claude: ${String(err?.message ?? err)}`;
     }
@@ -338,8 +362,44 @@ export class Walkthrough {
   go(index) {
     const steps = this.view?.steps ?? [];
     this.step = Math.max(0, Math.min(steps.length, index));
-    if (steps[this.step]) this.visited.add(steps[this.step].id);
     this.target = null;
+  }
+
+  /**
+   * One step on or back. Moving on from a step marks it read; with unread only
+   * on, read steps are passed over (on past the last is Not covered, back
+   * before the first stays put).
+   */
+  move(dir) {
+    const steps = this.view?.steps ?? [];
+    const here = steps[this.step];
+    // Only the code still there: an outdated step's missing hunks were never on screen.
+    if (dir > 0 && here) this.setRead({ hunkIds: here.found.map((f) => f.hunk.id) }, true);
+    let i = this.step + dir;
+    if (this.unreadOnly) while (i >= 0 && i < steps.length && isRead(steps[i], this.read)) i += dir;
+    if (i >= 0) this.go(i);
+  }
+
+  /** Marks a step's hunks (or any `{ hunkIds }`) read or unread, to be written on the next tick. */
+  setRead(step, on) {
+    this.read = on ? markStep(step, this.read) : unmarkStep(step, this.read);
+    for (const id of step.hunkIds) this.readChanged.add(readKey(id));
+  }
+
+  /** x: the shown step read or unread again. An outdated step can't be read until it is regenerated. */
+  toggleRead() {
+    const s = this.view?.steps[this.step];
+    if (!s || s.outdated) return;
+    this.setRead(s, !isRead(s, this.read));
+  }
+
+  /** The steps read before whose code has changed since. */
+  changedSteps() {
+    if (!this.view || !this.diff) return [];
+    return changedSince(this.view.steps, this.read, {
+      before: this.shown?.entry.before ?? [],
+      current: this.diff.files.flatMap((f) => f.hunks.map((h) => h.id)),
+    });
   }
 
   pickScope(key, cx) {
@@ -475,8 +535,10 @@ export class Walkthrough {
       else if (this.target) this.target = null;
       else if (this.confirmPost && !this.posting) this.confirmPost = false;
       else if (props()?.overlay) closeOverlay(props().overlay);
-    } else if (this.view && (k === "right" || k === "j" || k === "n")) this.go(this.step + 1);
-    else if (this.view && (k === "left" || k === "k" || k === "p")) this.go(this.step - 1);
+    } else if (this.view && (k === "right" || k === "j" || k === "n")) this.move(1);
+    else if (this.view && (k === "left" || k === "k" || k === "p")) this.move(-1);
+    else if (this.view && k === "x") this.toggleRead();
+    else if (this.view && k === "u") this.unreadOnly = !this.unreadOnly;
     else return;
     cx.notify();
   }
@@ -681,6 +743,16 @@ export class Walkthrough {
         button(t, "b-cancel", "Cancel", (_e, cx) => cx.spawn(async (cx) => this.cancel(cx)), { small: true })));
     }
     if (this.genError) out.push(bar("b-error", t.ansi1, this.genError, null));
+    const changed = this.changedSteps();
+    if (changed.length) {
+      const n = changed.length;
+      out.push(bar("b-changed", t.accent, `${n === 1 ? "1 step" : `${n} steps`} changed since you last read ${n === 1 ? "it" : "them"}.`,
+        button(t, "b-changed-go", "Go →", (_e, cx) => {
+          // Each press goes on to the next one, then round to the first.
+          this.go((changed.find((st) => st.position - 1 > this.step) ?? changed[0]).position - 1);
+          cx.notify();
+        }, { small: true })));
+    }
     const e = this.shown?.entry;
     if (e && !this.shown.exact && !this.job) {
       const otherModel = e.model !== this.model, otherLanguage = e.language !== this.language;
@@ -698,10 +770,15 @@ export class Walkthrough {
     return out;
   }
 
-  /** The table of contents: every step by part, visited ones ticked, outdated ones flagged. */
+  /** The table of contents: every step by part (or only those not read), read ones ticked, outdated and changed ones flagged. */
   contents(t) {
     const v = this.view, w = this.shown.entry.walkthrough;
     const uncovered = v.uncovered.length;
+    const fresh = v.uncovered.reduce((n, u) => n + u.hunks.filter((h) => !hunkRead(h.id, this.read)).length, 0);
+    const changed = new Set(this.changedSteps().map((s) => s.id));
+    // The step on screen stays listed, read or not, so the list never loses its place.
+    const listed = (s) => !this.unreadOnly || s.position - 1 === this.step || !isRead(s, this.read);
+    const parts = v.parts.map((part) => ({ part, steps: part.steps.filter(listed) })).filter((p) => p.steps.length);
     const stepRow = (s, i) => h_flex().id(`toc-${s.id}`).w_full().pl(6).pr(8).py(5).gap(8).items_center().rounded(6).cursor_pointer()
       .border_l(2).border_color(i === this.step ? t.accent : "#00000000")
       .when(i === this.step, (e) => e.bg(t.accent + "1f"))
@@ -709,17 +786,22 @@ export class Walkthrough {
       .on_click((_e, cx) => { this.go(i); cx.notify(); })
       .child(div().flex_none().size(18).rounded(5).flex().items_center().justify_center().text_size(10).font_semibold()
         .when(s.outdated, (e) => e.bg(t.blocked + "29").text_color(t.blocked).child("!"))
-        .when(!s.outdated && this.visited.has(s.id) && i !== this.step, (e) => e.bg(t.raised).text_color(t.ansi2).child("✓"))
-        .when(!s.outdated && (!this.visited.has(s.id) || i === this.step), (e) => e.bg(t.raised).text_color(t.muted).child(String(s.position))))
+        .when(!s.outdated && isRead(s, this.read) && i !== this.step, (e) => e.bg(t.raised).text_color(t.ansi2).child("✓"))
+        .when(!s.outdated && (!isRead(s, this.read) || i === this.step), (e) => e.bg(changed.has(s.id) ? t.accent + "29" : t.raised)
+          .text_color(changed.has(s.id) ? t.accent : t.muted).child(String(s.position))))
+      .when(changed.has(s.id), (e) => e.tooltip("Changed since you last read it"))
       .child(div().flex_1().min_w(0).truncate().text_size(12.5).when(s.weight === "skim", (e) => e.text_color(t.muted)).child(s.title))
       .when(s.weight === "key", (e) => e.child(div().flex_none().size(6).rounded(3).bg(t.accent).tooltip("Key change")));
     return v_flex().id("contents").w(248).flex_none().h_full().overflow_y_scrollbar().border_r(1).border_color(t.border).p(10).gap(2)
       .child(div().px(8).pt(2).text_size(13.5).font_semibold().child(w.title))
       .when(Boolean(w.summary), (e) => e.child(div().px(8).pt(4).pb(6).text_size(12).line_height(1.5).text_color(t.muted).child(w.summary)))
-      .children(v.parts.flatMap((part) => [
+      .when(this.unreadOnly, (e) => e.child(h_flex().px(8).pt(8).gap(6).items_center().text_size(11).text_color(t.accent)
+        .child(div().child("Unread only")).child(div().text_color(t.dim).child("· u shows all"))))
+      .children(parts.flatMap(({ part, steps }) => [
         div().px(8).pt(12).pb(3).text_size(10).font_semibold().text_color(t.dim).child(part.title.toUpperCase()),
-        ...part.steps.map((s) => stepRow(s, s.position - 1)),
+        ...steps.map((s) => stepRow(s, s.position - 1)),
       ]))
+      .when(this.unreadOnly && !parts.length, (e) => e.child(div().px(8).pt(12).text_size(12).text_color(t.muted).child("Every step is read.")))
       .child(div().mt(8).mx(8).h(1).bg(t.border))
       .child(h_flex().id("toc-tail").mt(6).w_full().pl(6).pr(8).py(5).gap(8).items_center().rounded(6).cursor_pointer()
         .border_l(2).border_color(this.step === v.steps.length ? t.accent : "#00000000")
@@ -728,7 +810,8 @@ export class Walkthrough {
         .on_click((_e, cx) => { this.go(v.steps.length); cx.notify(); })
         .child(div().flex_none().w(18).text_center().text_size(11).text_color(t.dim).child("…"))
         .child(div().flex_1().text_size(12.5).text_color(t.muted).child("Not covered"))
-        .child(div().text_size(11).text_color(t.dim).child(String(uncovered))))
+        .child(div().text_size(11).text_color(fresh ? t.accent : t.dim).child(String(uncovered)))
+        .when(fresh > 0, (e) => e.tooltip(`${fresh} hunk${fresh === 1 ? "" : "s"} not read`)))
       .child(div().px(8).pt(12).text_size(10.5).text_color(t.dim).child(this.meta()));
   }
 
@@ -743,8 +826,14 @@ export class Walkthrough {
   page(t, s) {
     const part = this.view.parts[s.part];
     const total = this.view.steps.length;
+    const read = isRead(s, this.read);
     return v_flex().id(`page-${s.id}-${this.shown.entry.generatedAt}`).flex_1().min_h(0).overflow_y_scrollbar().px(22).py(16).gap(10)
-      .child(div().text_size(10.5).font_semibold().text_color(t.dim).child(`${part.title.toUpperCase()}  ·  STEP ${s.position} OF ${total}`))
+      .child(h_flex().gap(8).items_center()
+        .child(div().flex_1().text_size(10.5).font_semibold().text_color(t.dim).child(`${part.title.toUpperCase()}  ·  STEP ${s.position} OF ${total}`))
+        .child(button(t, "read-toggle", read ? "✓ Read" : "Mark read", (_e, cx) => { this.toggleRead(); cx.notify(); }, {
+          kind: "ghost", small: true, disabled: s.outdated,
+          tooltip: s.outdated ? "Its code has changed: regenerate to read it as it is now" : read ? "Mark unread (x)" : "Mark read (x)",
+        })))
       .child(h_flex().gap(8).items_center().flex_wrap()
         .child(div().text_size(17).font_semibold().child(s.title))
         .when(s.weight === "key", (e) => e.child(chip(t, "Key change", t.accent, t.accent + "14").tooltip("The rest of the change depends on this, or its main behavior lives here. Read it closely.")))
@@ -774,16 +863,22 @@ export class Walkthrough {
         const open = this.openFiles.has(id);
         const twice = v.uncovered.filter((u) => u.file.path === file.path).length > 1;
         const added = hunks.reduce((n, h) => n + h.added, 0), deleted = hunks.reduce((n, h) => n + h.deleted, 0);
-        return v_flex().rounded(8).border_1().border_color(t.border)
-          .child(h_flex().id(`tail-${id}`).px(10).py(6).gap(8).items_center().when(hunks.length > 0, (e) => e.cursor_pointer().hover((st) => st.bg(t.hover)))
-            .on_click((_e, cx) => { if (!hunks.length) return; open ? this.openFiles.delete(id) : this.openFiles.add(id); cx.notify(); })
-            .child(div().w(10).text_size(9).text_color(t.dim).child(hunks.length ? (open ? "▼" : "▶") : ""))
-            .child(v_flex().flex_1().min_w(0)
-              .child(div().truncate().text_size(12.5).child(twice ? `${file.path}  (${scopeName(file.scope)})` : file.path))
-              .when(Boolean(note || file.unread), (e) => e.child(div().text_size(11.5).text_color(t.dim).child(file.unread ?? note))))
-            .when(file.status !== "modified", (e) => e.child(div().text_size(11).text_color(t.dim).child(file.status)))
-            .child(div().text_size(11.5).text_color(t.ansi2).child(added ? `+${added}` : ""))
-            .child(div().text_size(11.5).text_color(t.ansi1).child(deleted ? `−${deleted}` : "")))
+        const fresh = hunks.filter((h) => !hunkRead(h.id, this.read)).length;
+        const all = { hunkIds: hunks.map((h) => h.id) };
+        return v_flex().rounded(8).border_1().border_color(fresh ? t.accent : t.border)
+          .child(h_flex().pr(8).gap(8).items_center()
+            .child(h_flex().id(`tail-${id}`).flex_1().min_w(0).px(10).py(6).gap(8).items_center().when(hunks.length > 0, (e) => e.cursor_pointer().hover((st) => st.bg(t.hover)))
+              .on_click((_e, cx) => { if (!hunks.length) return; open ? this.openFiles.delete(id) : this.openFiles.add(id); cx.notify(); })
+              .child(div().w(10).text_size(9).text_color(t.dim).child(hunks.length ? (open ? "▼" : "▶") : ""))
+              .child(v_flex().flex_1().min_w(0)
+                .child(div().truncate().text_size(12.5).when(hunks.length > 0 && !fresh, (e) => e.text_color(t.muted)).child(twice ? `${file.path}  (${scopeName(file.scope)})` : file.path))
+                .when(Boolean(note || file.unread), (e) => e.child(div().text_size(11.5).text_color(t.dim).child(file.unread ?? note))))
+              .when(file.status !== "modified", (e) => e.child(div().text_size(11).text_color(t.dim).child(file.status)))
+              .child(div().text_size(11.5).text_color(t.ansi2).child(added ? `+${added}` : ""))
+              .child(div().text_size(11.5).text_color(t.ansi1).child(deleted ? `−${deleted}` : "")))
+            .when(fresh > 0, (e) => e.child(chip(t, fresh === hunks.length ? "Unread" : `${fresh} unread`, t.accent, t.accent + "14")))
+            .when(hunks.length > 0, (e) => e.child(button(t, `tail-read-${id}`, fresh ? "Mark read" : "✓ Read", (_e, cx) => { this.setRead(all, fresh > 0); cx.notify(); },
+              { kind: "ghost", small: true, tooltip: fresh ? "Mark this file's hunks here read" : "Mark them unread" }))))
           .when(open, (e) => e.child(div().border_t(1).border_color(t.border).child(this.code(t, hunks.map((hunk) => ({ hunk, file })), false))));
       }));
   }
@@ -810,7 +905,10 @@ export class Walkthrough {
           .when(file.status !== "modified", (e) => e.child(div().text_size(11).text_color(t.dim).child(file.oldPath ? `${file.status} from ${file.oldPath}` : file.status))));
       }
       last = name;
-      rows.push(div().h(20).px(10).flex().items_center().bg(t.hover).text_color(t.dim).text_size(11).font_family(font).truncate().child(hunk.header));
+      // Without headers (Not covered), a hunk not read yet says so.
+      const fresh = !headers && !hunkRead(hunk.id, this.read);
+      rows.push(div().h(20).px(10).flex().items_center().bg(fresh ? t.accent + "1f" : t.hover).text_color(fresh ? t.accent : t.dim).text_size(11).font_family(font).truncate()
+        .child(fresh ? `● ${hunk.header}` : hunk.header));
       for (const line of numberLines(hunk)) {
         if (lines >= MAX_PAGE_LINES) { cut++; continue; }
         lines++;
@@ -865,12 +963,15 @@ export class Walkthrough {
 
   footer(t) {
     const steps = this.view.steps.length;
+    const read = this.view.steps.filter((s) => isRead(s, this.read)).length;
     const agent = this.agent();
     const n = this.ownComments().length;
     return h_flex().h(44).flex_none().px(14).gap(8).items_center().border_t(1).border_color(t.border)
-      .child(button(t, "prev", "← Previous", (_e, cx) => { this.go(this.step - 1); cx.notify(); }, { small: true, disabled: this.step === 0 }))
-      .child(button(t, "next", this.step === steps - 1 ? "Not covered →" : "Next →", (_e, cx) => { this.go(this.step + 1); cx.notify(); }, { small: true, disabled: this.step >= steps }))
-      .child(div().text_size(11.5).text_color(t.dim).child(this.step < steps ? `${this.visited.size} of ${steps} read · ← → to move` : "End of the walkthrough"))
+      .child(button(t, "prev", "← Previous", (_e, cx) => { this.move(-1); cx.notify(); }, { small: true, disabled: this.step === 0 }))
+      .child(button(t, "next", this.step === steps - 1 ? "Not covered →" : "Next →", (_e, cx) => { this.move(1); cx.notify(); }, { small: true, disabled: this.step >= steps }))
+      .child(div().text_size(11.5).text_color(t.dim).child(this.step < steps ? `${read} / ${steps} read · ← → to move` : `End of the walkthrough · ${read} / ${steps} read`))
+      .child(button(t, "unread-only", this.unreadOnly ? "Show all" : "Unread only", (_e, cx) => { this.unreadOnly = !this.unreadOnly; cx.notify(); },
+        { kind: "ghost", small: true, tooltip: this.unreadOnly ? "List every step again (u)" : "List and step through only the steps not read yet (u)" }))
       .child(div().flex_1())
       .when(this.confirmPost && Boolean(this.pr), (e) => e
         .child(div().text_size(11.5).text_color(t.foreground).truncate().child(`Post this walkthrough as a comment on #${this.pr.number}? Everyone who can see the pull request will see it.`))
