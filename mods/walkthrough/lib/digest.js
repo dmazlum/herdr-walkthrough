@@ -40,7 +40,7 @@ export function buildDigest(sections) {
       body.push(`[${alias}] ${hunk.header}`, ...hunk.lines);
     }
     blocks.push(body.join("\n"));
-    digestFiles.push({ path: file.path, aliases });
+    digestFiles.push({ path: file.path, aliases, status: file.status });
   }
 
   return {

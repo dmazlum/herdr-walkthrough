@@ -28,6 +28,25 @@ click? Add the two [Last turn hooks](#last-turn).
 
 ## What you get
 
+### Architecture overview and contracts
+
+The first page is **Recap**: what changed, why, and a native architecture blueprint.
+Select a component to inspect its role, change status and source files, or focus on its
+direct connections. Source-backed labels explain connections, and groups show evidenced
+architecture boundaries. File links jump to the walkthrough section that explains them.
+
+When the diff changes a database schema, Protobuf definition or public API contract,
+**Contracts** pages follow Recap and the optional Task page. Each change shows before/after
+excerpts, compatibility impact, deployment order when established, its exact supporting
+diff and links to matching code steps. Missing evidence and changes without a matching
+step are marked. Contract controls and exported labels support all fourteen selectable
+languages; generated explanations follow the chosen language.
+
+Older reports remain readable. Regenerate them to add blueprint metadata or contract pages,
+or to replace explanations generated in the wrong language. Source toggles and step links
+work with existing reports that already contain the required evidence. Read tracking,
+Last turn and task mapping work across the additional pages.
+
 ### A diff you can read top to bottom
 
 - **Steps in reading order.** Related edits across files become one step. Types and entry

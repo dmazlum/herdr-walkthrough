@@ -1,3 +1,9 @@
+import { CONTRACT_SCHEMA, normalizeContracts } from "./contracts.js";
+import { COMPONENT_SCHEMA, normalizeComponents } from "./blueprint.js";
+import { CONNECTION_SCHEMA, normalizeConnections } from "./connections.js";
+import { GROUP_SCHEMA, normalizeGroups } from "./groups.js";
+import { parseMermaid } from "./diagram.js";
+
 // The walkthrough's shape, how a model's answer is made safe, and how a stored
 // walkthrough is laid over the diff as it is now.
 //
@@ -7,7 +13,7 @@
 
 export const VERSION = 1;
 // Part of every cache key: a different prompt writes a different walkthrough.
-export const PROMPT_VERSION = 1;
+export const PROMPT_VERSION = 8;
 
 export const LIMITS = { parts: 6, steps: 16, hunksPerStep: 14, partTitle: 28, notes: 6, notesPerStep: 2, skipped: 200, asks: 12, askText: 200 };
 export const WEIGHTS = ["key", "normal", "skim"];
@@ -19,10 +25,27 @@ const str = { type: "string" };
 export const SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["title", "summary", "parts", "skipped"],
+  required: ["title", "summary", "recap", "contracts", "parts", "skipped"],
   properties: {
     title: str,
     summary: str,
+    contracts: CONTRACT_SCHEMA,
+    recap: {
+      type: "object", additionalProperties: false,
+      required: ["changes", "architecture"],
+      properties: {
+        changes: { type: "array", minItems: 1, items: {
+          type: "object", additionalProperties: false,
+          required: ["description", "motivation", "paths"],
+          properties: { description: str, motivation: str, paths: { type: "array", minItems: 1, items: str } },
+        } },
+        architecture: {
+          type: "object", additionalProperties: false,
+          required: ["description", "mermaid", "components", "connections", "groups"],
+          properties: { description: str, mermaid: str, components: COMPONENT_SCHEMA, connections: CONNECTION_SCHEMA, groups: GROUP_SCHEMA },
+        },
+      },
+    },
     parts: {
       type: "array",
       items: {
@@ -164,9 +187,37 @@ export function normalize(raw, idByAlias, digestFiles = [], { asks: withTask = f
     skipped.push({ path, note });
   }
 
+  const recap = normalizeRecap(raw.recap, digestFiles, idByAlias);
+  const contracts = normalizeContracts(raw.contracts, idByAlias, digestFiles);
   const asks = withTask ? normalizeAsks(raw.asks, idByAlias) : null;
-  return { title: text(raw.title, 140) || "Walkthrough", summary: text(raw.summary), parts, skipped, dropped, asks };
+  return { recap, contracts, asks, title: text(raw.title, 140) || "Walkthrough", summary: text(raw.summary), parts, skipped, dropped };
 }
+
+/** Legacy reports stay readable; new structured recaps must be complete. */
+function normalizeRecap(raw, files, idByAlias) {
+  if (raw === undefined) return null;
+  const known = new Set(files.map((f) => f.path));
+  const changes = [];
+  for (const c of Array.isArray(raw?.changes) ? raw.changes : []) {
+    const description = text(c?.description), motivation = text(c?.motivation);
+    const paths = [...new Set((Array.isArray(c?.paths) ? c.paths : []).filter((p) => known.has(p)))];
+    if (!description || !motivation || !paths.length) throw fail("Recap changes need descriptions, motivations and real file paths.");
+    changes.push({ description, motivation, paths });
+  }
+  const description = text(raw?.architecture?.description);
+  const mermaid = text(raw?.architecture?.mermaid);
+  const covered = new Set(changes.flatMap((c) => c.paths));
+  if ([...known].some((path) => !covered.has(path))) throw fail("Recap omitted changed files. Regenerate for complete coverage.");
+  if (!changes.length || !description) throw fail("Recap needs changes and an architecture description.");
+  validateMermaid(mermaid);
+  const components = normalizeComponents(raw?.architecture?.components, mermaid, idByAlias, files);
+  const connections = normalizeConnections(raw?.architecture?.connections, mermaid, idByAlias, files);
+  const groups = normalizeGroups(raw?.architecture?.groups, mermaid, components, idByAlias, files);
+  return { changes, architecture: { description, mermaid, ...(components === undefined ? {} : { components }), ...(connections === undefined ? {} : { connections }), ...(groups === undefined ? {} : { groups }) } };
+}
+
+/** A deliberately small, portable Mermaid flowchart subset. */
+export function validateMermaid(source) { parseMermaid(source); }
 
 /**
  * The task's requests, each with real hunk ids. Coverage follows the hunks,

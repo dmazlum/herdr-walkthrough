@@ -8,6 +8,25 @@ change and never judges it.
 
 ![Walkthrough](preview.png)
 
+## Recap, blueprint and contracts
+
+The first page is Recap, with a native interactive blueprint. The optional Task page
+follows Recap. Components show validated change status, role and changes, source-file
+navigation, connection labels and evidence-based groups. Selecting a component highlights
+its direct connections; Show all clears that focus. Source-file links navigate to the
+matching reading section, or to the relevant Contract or Not covered page.
+
+Conditional database, Protobuf and API contract pages follow Recap and Task before the
+code steps. Each change has a before/after comparison, its own exact source diff toggle
+and links to matching walkthrough steps. Stale source and changes without a matching step
+are marked. Contract UI and Markdown labels follow the selected/saved report language;
+generation explicitly requests the chosen language. Existing wrong-language prose needs
+regeneration. Older reports remain readable; new metadata requires regeneration.
+
+All pages share one reading order. Persistent hunk read tracking counts only code steps;
+unread-only navigation retains Recap, Task, Contracts and Not covered. The toolbar's source
+and model/language controls stack at narrow widths to avoid overlapping.
+
 ## What you see
 
 A dialog 74% of the window wide and 80% tall (`modal`), on `theme().popover`; as a pane, on

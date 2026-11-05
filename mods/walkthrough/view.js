@@ -1,8 +1,14 @@
+import { contractStrings } from "./lib/contract-language.js";
+import { contractChangeEvidence, contractChangeTargets } from "./lib/contract-evidence.js";
+import { contractPage } from "./contracts-view.js";
+import { reportPages, blueprintFileTargets } from "./lib/navigation.js";
 // The walkthrough: a change read in the order it makes sense, one step at a
 // time, with the code each step talks about under it.
 
+import { mermaidWithConnections } from "./lib/diagram.js";
+import { blueprintView } from "./blueprint-view.js";
 import { div } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, VirtualListScrollHandle } from "gpui-base";
+import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, VirtualListScrollHandle, TextView } from "gpui-base";
 import { spaces, panes, focused, agents, theme, props, closeOverlay, hc, exec, nextCommand, settings, shared, setShared, watchFolder } from "herdr";
 import { SCOPES, repoAt, currentHead, defaultBase, baseChoices, recentCommits, pullRequests, sourceKey, commitMessage, taskSince } from "./lib/sources.js";
 import { overlay, fileTotals, overlayAsks, asksOf } from "./lib/walkthrough.js";
@@ -13,7 +19,7 @@ import { LANGUAGES, languageOf, fromLocale } from "./lib/languages.js";
 import { MODELS, DEFAULT_MODEL, modelOf } from "./lib/job.js";
 import { estimateTokens, codeKey, placeKey, MAX_PROMPT_CHARS } from "./lib/cache.js";
 import { formatComments, addComment, sameSpot } from "./lib/comments.js";
-import { toMarkdown } from "./lib/export.js";
+import { toMarkdown, recapMarkdown } from "./lib/export.js";
 import { readKey, hunkRead, isRead, markStep, unmarkStep, mergeRead, changedSince } from "./lib/read.js";
 import { readDiff, readPreferences, matters, keyFor, findShown, preparePrompt, fits, promptChars, jobOf, startJob, alive, finished, cancelJob, finishJob, copyText, postComment, claudeVersion, systemLocale, ensureDirs, loadRead, saveRead, transcriptMessages } from "./engine.js";
 import { button, chip, menu, picker, formatElapsed, formatTokens } from "./ui.js";
@@ -119,11 +125,18 @@ export class Walkthrough {
     this.loading = false;
     this.error = null;
     this.genError = null;
-    this.step = 0; // index into view.steps; steps.length is the "Not covered" page
+    this.diagramZoom = 1;
+    this.diagramSource = false;
+    this.diagramSelected = null;
+    this.navigationFile = null;
+    this.step = 0; // index into reportPages: Recap always first
+    this.visitedPages = new Set(["recap"]);
     this.read = {}; // the repository's read hunks, { "<path>:<digest>": ms }
     this.readChanged = new Set(); // keys marked or unmarked here and not yet written
     this.unreadOnly = false; // the contents and ← → skip read steps
     this.openFiles = new Set();
+    this.openContracts = new Set();
+    this.openContractChanges = new Set();
     this.comments = [];
     this.target = null; // { sk, scope, path, line, kind, code }: the line a comment is being written on
     this.agentTo = null;
@@ -179,6 +192,7 @@ export class Walkthrough {
         else if (name === "next") this.move(1);
         else if (name === "prev") this.move(-1);
         else if (name === "copy") await this.copy(cx);
+        else if (name === "recap" && this.view) this.go(0);
         else if (name === "unread") this.unreadOnly = !this.unreadOnly;
         else if (name === "task") this.chooseTask("own", cx);
         cx.notify();
@@ -258,9 +272,9 @@ export class Walkthrough {
     return list;
   }
 
-  /** The first page: the task's, when the shown walkthrough was matched against one. */
+  /** Recap remains the first page, followed by the optional task and contracts. */
   firstPage() {
-    return this.taskView ? -1 : 0;
+    return 0;
   }
 
   /** Re-reads the diff and what to show for it. A newer reload wins over an older one still running. */
@@ -305,15 +319,20 @@ export class Walkthrough {
         // With nothing changed there is nothing to walk through: the last walkthrough shown here isn't offered (nor its footer, nor Copy).
         this.view = shown && diff.files.length ? overlay(shown.entry.walkthrough, diff.files) : null;
         this.taskView = this.view ? overlayAsks(shown.entry.walkthrough.asks, this.view) : null;
-        // Another walkthrough is another reading path: it opens on its first step not yet read,
-        // or on its task while none of it is read.
+        // Another report opens on Recap; persistent hunk marks survive the new reading path.
         if (before !== shown?.entry?.key + String(shown?.entry?.generatedAt)) {
-          const first = this.view?.steps.findIndex((st) => !isRead(st, this.read)) ?? -1;
-          this.step = this.taskView && !this.view.steps.some((st) => isRead(st, this.read)) ? -1 : Math.max(0, first);
-          this.openFiles = new Set();
+          this.step = 0;
+          this.diagramZoom = 1;
+          this.diagramSource = false;
+          this.diagramSelected = null;
+          this.navigationFile = null;
+          this.visitedPages = new Set(["recap"]);
           this.showTaskText = false;
+          this.openFiles = new Set();
+          this.openContracts = new Set();
+          this.openContractChanges = new Set();
         }
-        if (this.view) this.step = Math.max(this.firstPage(), Math.min(this.step, this.view.steps.length));
+        if (this.view) this.step = Math.min(this.step, this.pages().length - 1);
       }
       this.error = null;
     } catch (e) {
@@ -479,25 +498,100 @@ export class Walkthrough {
     cx.notify();
   }
 
-  /** -1 is the task's page (when there is one), steps.length Not covered. */
+  contractLanguage() { return this.language ?? this.shown?.entry?.language ?? "en"; }
+
+  pages() { return reportPages(this.shown?.entry?.walkthrough, this.view, this.contractLanguage(), { task: Boolean(this.taskView) }); }
+
+  pageIndex(kind, stepId = null) {
+    return this.pages().findIndex((p) => p.kind === kind && (!stepId || p.step?.id === stepId));
+  }
+
   go(index) {
-    const steps = this.view?.steps ?? [];
-    this.step = Math.max(this.firstPage(), Math.min(steps.length, index));
+    const pages = this.pages();
+    this.step = Math.max(0, Math.min(Math.max(0, pages.length - 1), index));
+    const page = pages[this.step];
+    if (page?.kind === "recap") this.visitedPages.add("recap");
+    else if (page?.kind === "task") this.visitedPages.add("task");
+    else if (page?.kind === "contract") this.visitedPages.add(`contract-${page.contract.kind}`);
     this.target = null;
+    this.navigationFile = null;
+  }
+
+  blueprintTargets(path) {
+    const w = this.shown?.entry?.walkthrough;
+    const component = w?.recap?.architecture?.components?.find((c) => c.id === this.diagramSelected);
+    return blueprintFileTargets(w, this.view, this.diff?.files ?? [], component, path, this.contractLanguage());
+  }
+
+  goToBlueprintFile(path, cx) {
+    const destination = this.blueprintTargets(path)[0];
+    if (!destination) return;
+    this.go(destination.index);
+    this.navigationFile = path;
+    if (destination.kind === "tail") {
+      for (const u of this.view.uncovered) if (u.file.path === path) this.openFiles.add(`${u.file.scope}:${path}`);
+    } else if (destination.kind === "contract") {
+      this.openContracts.add(this.pages()[destination.index].contract.kind);
+    }
+    cx.notify();
+  }
+
+  toggleContractChange(kind, index, cx) {
+    const key = `${kind}:${index}`;
+    this.openContractChanges ??= new Set();
+    this.openContractChanges.has(key) ? this.openContractChanges.delete(key) : this.openContractChanges.add(key);
+    cx.notify();
+  }
+
+  goToContractStep(kind, changeIndex, destinationIndex, cx) {
+    const page = this.pages()[this.step];
+    if (page?.kind !== "contract" || page.contract.kind !== kind) return;
+    const change = page.contract.changes[changeIndex];
+    const target = contractChangeTargets(this.pages(), change).find((t) => t.index === destinationIndex);
+    if (!target) return;
+    this.go(target.index);
+    cx.notify();
+  }
+
+  reportPage(t) {
+    const page = this.pages()[this.step];
+    if (page?.kind === "contract") {
+      const contract = page.contract;
+      const ids = new Set(contract.changes.flatMap((c) => c.hunkIds));
+      const found = [];
+      for (const file of this.diff.files) for (const hunk of file.hunks) if (ids.has(hunk.id)) found.push({ file, hunk });
+      const changeEvidence = contract.changes.map((change) => ({
+        ...contractChangeEvidence(change, this.diff.files), targets: contractChangeTargets(this.pages(), change),
+      }));
+      return contractPage(contract, t, {
+        changeEvidence,
+        openChanges: new Set(contract.changes.flatMap((_c, i) => this.openContractChanges?.has(`${contract.kind}:${i}`) ? [i] : [])),
+        onToggleChange: (i, cx) => this.toggleContractChange(contract.kind, i, cx),
+        renderChangeSource: (i) => changeEvidence[i].found.length ? this.code(t, changeEvidence[i].found) : null,
+        onGoToStep: (i, index, cx) => this.goToContractStep(contract.kind, i, index, cx),
+        language: this.contractLanguage(),
+        width: Math.max(260, (this.width ?? 1000) - ((this.width ?? 1000) >= 720 ? 248 : 0) - 48),
+        sourceOpen: this.openContracts.has(contract.kind),
+        onToggleSource: (cx) => { this.openContracts.has(contract.kind) ? this.openContracts.delete(contract.kind) : this.openContracts.add(contract.kind); cx.notify(); },
+        source: this.openContracts.has(contract.kind) ? this.code(t, found) : null,
+        missing: ids.size - found.length,
+      });
+    }
+    return page?.kind === "recap" ? this.recap(t) : page?.kind === "task" ? this.taskPage(t) : page?.kind === "step" ? this.page(t, page.step) : this.tail(t);
   }
 
   /**
    * One step on or back. Moving on from a step marks it read; with unread only
    * on, read steps are passed over (on past the last is Not covered, back
-   * before the first is the task's page, or stays put).
+   * through the task/contracts to Recap).
    */
   move(dir) {
-    const steps = this.view?.steps ?? [];
-    const here = steps[this.step];
+    const pages = this.pages();
+    const here = pages[this.step]?.kind === "step" ? pages[this.step].step : null;
     // Only the code still there: an outdated step's missing hunks were never on screen.
     if (dir > 0 && here) this.setRead({ hunkIds: here.found.map((f) => f.hunk.id) }, true);
     let i = this.step + dir;
-    if (this.unreadOnly) while (i >= 0 && i < steps.length && isRead(steps[i], this.read)) i += dir;
+    if (this.unreadOnly) while (pages[i]?.kind === "step" && isRead(pages[i].step, this.read)) i += dir;
     if (i >= this.firstPage()) this.go(i);
   }
 
@@ -509,7 +603,8 @@ export class Walkthrough {
 
   /** x: the shown step read or unread again. An outdated step can't be read until it is regenerated. */
   toggleRead() {
-    const s = this.view?.steps[this.step];
+    const page = this.pages()[this.step];
+    const s = page?.kind === "step" ? page.step : null;
     if (!s || s.outdated) return;
     this.setRead(s, !isRead(s, this.read));
   }
@@ -723,7 +818,7 @@ export class Walkthrough {
     else if (this.view && (k === "left" || k === "k" || k === "p")) this.move(-1);
     else if (this.view && k === "x") this.toggleRead();
     else if (this.view && k === "u") this.unreadOnly = !this.unreadOnly;
-    else if (this.taskView && k === "t") this.go(-1);
+    else if (this.taskView && k === "t") this.go(this.pageIndex("task"));
     else return;
     cx.notify();
   }
@@ -781,7 +876,10 @@ export class Walkthrough {
       .child(action);
     const label = (text) => div().flex_none().text_size(11).text_color(t.dim).child(text);
     const auto = this.auto !== "off";
-    const which = h_flex().flex_1().min_w(0).gap(8).items_center()
+    const narrow = (this.width ?? 1000) < 1000;
+    const which = h_flex().min_w(0).gap(8).items_center()
+      .when(narrow, (el) => el.flex_none().w_full().flex_wrap())
+      .when(!narrow, (el) => el.flex_1())
       .when(this.scope === "branch", (el) => el.child(label("vs")).child(picker(t, "pick-base", this.base ?? "Pick a base", open("base"))))
       .when(this.scope === "commit", (el) => el.child(picker(t, "pick-commit", this.commit ? `${this.commit.short} ${this.commit.subject}` : "Pick a commit", open("commit"))))
       .when(this.scope === "pr" && Boolean(this.prs?.length), (el) => el.child(picker(t, "pick-pr", this.pr ? `#${this.pr.number} ${this.pr.title}` : "Pick a pull request", open("pr"))))
@@ -791,13 +889,16 @@ export class Walkthrough {
           tooltip: auto ? `${autoOf(this.auto).about}. Click to turn it off.` : "Only when you press Generate. Click to write the last turn's walkthrough without a click.",
         })));
     const how = h_flex().flex_none().gap(8).items_center()
+      .when(narrow, (el) => el.w_full().flex_wrap())
       .when(Boolean(this.diff), (el) => el.child(label("Matched against")).child(picker(t, "pick-task", this.taskFace(), open("task"),
         { tooltip: this.task ? `Matched against ${this.task.label.charAt(0).toLowerCase()}${this.task.label.slice(1)}` : "What the change is matched against" })))
       .child(h_flex().flex_none().items_center().rounded(6).border_1().border_color(t.border)
         .child(picker(t, "pick-model", modelOf(this.model).name, open("model"), { tooltip: "Model", kind: "ghost" }))
         .child(div().w(1).h(14).bg(t.border))
         .child(picker(t, "pick-language", languageOf(this.language).name, open("language"), { tooltip: "Language of the explanations", kind: "ghost" })));
-    const below = h_flex().min_h(36).flex_none().px(14).py(5).gap(8).items_center().border_b(1).border_color(t.border).child(which).child(how);
+    const below = (narrow ? v_flex() : h_flex()).id("toolbar-options").min_h(36).flex_none().px(14).py(5).gap(8).items_center().border_b(1).border_color(t.border)
+      .when(!narrow || ["branch", "commit", "pr", "turn"].includes(this.scope), (el) => el.child(which))
+      .child(how);
     return v_flex().flex_none().child(top).child(below);
   }
 
@@ -909,7 +1010,7 @@ export class Walkthrough {
       .when((this.width ?? 1000) >= 720, (e) => e.child(this.contents(t)))
       .child(v_flex().flex_1().min_w(0).h_full()
         .children(this.banners(t))
-        .child(this.step < 0 ? this.taskPage(t) : this.step < this.view.steps.length ? this.page(t, this.view.steps[this.step]) : this.tail(t)));
+        .child(this.reportPage(t)));
   }
 
   /** The reader's own task, written under the toolbar. */
@@ -933,7 +1034,7 @@ export class Walkthrough {
     const tv = this.taskView, e = this.shown.entry, task = e.task;
     const toStep = (s, id) => div().id(id).flex_none().px(7).h(20).flex().items_center().rounded(5).border_1().border_color(t.border).bg(t.raised)
       .text_size(11.5).cursor_pointer().hover((st) => st.bg(t.hover)).tooltip(s.title)
-      .on_click((_e, cx) => { this.go(s.position - 1); cx.notify(); })
+      .on_click((_e, cx) => { this.go(this.pageIndex("step", s.id)); cx.notify(); })
       .child(`${s.position}. ${clip(s.title, 42)}`);
     const color = (c) => (c === "seen" ? t.ansi2 : c === "partly" ? t.ansi3 : t.dim);
     const row = (a) => h_flex().w_full().max_w(820).gap(10).items_start().py(6).border_b(1).border_color(t.border)
@@ -945,7 +1046,7 @@ export class Walkthrough {
           .when(a.coverage === "absent", (el) => el.child(div().text_size(11.5).text_color(t.dim).child("Not in this diff")))
           .children(a.steps.map((s) => toStep(s, `task-${a.id}-${s.id}`)))
           .when(a.tail > 0, (el) => el.child(div().id(`task-${a.id}-tail`).text_size(11.5).text_color(t.dim).cursor_pointer().hover((st) => st.text_color(t.foreground))
-            .on_click((_e, cx) => { this.go(this.view.steps.length); cx.notify(); })
+            .on_click((_e, cx) => { this.go(this.pageIndex("tail")); cx.notify(); })
             .child(a.steps.length ? `and ${a.tail} hunk${a.tail === 1 ? "" : "s"} under Not covered` : `${a.tail} hunk${a.tail === 1 ? "" : "s"} under Not covered`)))
           .when(a.outdated, (el) => el.child(chip(t, "Outdated", t.blocked, t.blocked + "14").tooltip("Code this request was tied to has changed or is gone")))));
     const text = task?.text ?? "";
@@ -1050,7 +1151,7 @@ export class Walkthrough {
       out.push(bar("b-changed", t.accent, "↻", `${n === 1 ? "1 step" : `${n} steps`} changed since you last read ${n === 1 ? "it" : "them"}.`,
         button(t, "b-changed-go", "Go →", (_e, cx) => {
           // Each press goes on to the next one, then round to the first.
-          this.go((changed.find((st) => st.position - 1 > this.step) ?? changed[0]).position - 1);
+          this.go(this.pageIndex("step", (changed.find((st) => this.pageIndex("step", st.id) > this.step) ?? changed[0]).id));
           cx.notify();
         }, { small: true })));
     }
@@ -1081,26 +1182,28 @@ export class Walkthrough {
   contents(t) {
     const v = this.view, w = this.shown.entry.walkthrough;
     const uncovered = v.uncovered.length;
+    const pages = this.pages(), tailIndex = pages.length - 1;
+    const groupTitle = (title) => div().px(8).pt(12).pb(3).text_size(10).font_semibold().text_color(t.dim).child(title.toUpperCase());
     const fresh = v.uncovered.reduce((n, u) => n + u.hunks.filter((h) => !hunkRead(h.id, this.read)).length, 0);
     const changed = new Set(this.changedSteps().map((s) => s.id));
     // The step on screen stays listed, read or not, so the list never loses its place.
-    const listed = (s) => !this.unreadOnly || s.position - 1 === this.step || !isRead(s, this.read);
+    const listed = (s) => !this.unreadOnly || this.pageIndex("step", s.id) === this.step || !isRead(s, this.read);
     const parts = v.parts.map((part) => ({ part, steps: part.steps.filter(listed) })).filter((p) => p.steps.length);
-    const stepRow = (s, i) => h_flex().id(`toc-${s.id}`).w_full().pl(6).pr(8).py(5).gap(8).items_center().rounded(6).cursor_pointer()
+    const stepRow = (s, i, read = s.hunkIds ? isRead(s, this.read) : this.visitedPages.has(s.id)) => h_flex().id(`toc-${s.id}`).w_full().pl(6).pr(8).py(5).gap(8).items_center().rounded(6).cursor_pointer()
       .border_l(2).border_color(i === this.step ? t.accent : "#00000000")
       .when(i === this.step, (e) => e.bg(t.accent + "1f"))
       .when(i !== this.step, (e) => e.hover((st) => st.bg(t.hover)))
       .on_click((_e, cx) => { this.go(i); cx.notify(); })
       .child(div().flex_none().size(18).rounded(5).flex().items_center().justify_center().text_size(10).font_semibold()
         .when(s.outdated, (e) => e.bg(t.blocked + "29").text_color(t.blocked).child("!"))
-        .when(!s.outdated && isRead(s, this.read) && i !== this.step, (e) => e.bg(t.raised).text_color(t.ansi2).child("✓"))
-        .when(!s.outdated && (!isRead(s, this.read) || i === this.step), (e) => e.bg(changed.has(s.id) ? t.accent + "29" : t.raised)
+        .when(!s.outdated && read && i !== this.step, (e) => e.bg(t.raised).text_color(t.ansi2).child("✓"))
+        .when(!s.outdated && (!read || i === this.step), (e) => e.bg(changed.has(s.id) ? t.accent + "29" : t.raised)
           .text_color(changed.has(s.id) ? t.accent : t.muted).child(String(s.position))))
       .when(changed.has(s.id), (e) => e.tooltip("Changed since you last read it"))
       // A step read and left behind fades; one to skim is quieter than one to read.
       .child(div().flex_1().min_w(0).truncate().text_size(12.5)
-        .when(isRead(s, this.read) && i !== this.step, (e) => e.text_color(t.dim))
-        .when(!(isRead(s, this.read) && i !== this.step) && s.weight === "skim", (e) => e.text_color(t.muted)).child(s.title))
+        .when(read && i !== this.step, (e) => e.text_color(t.dim))
+        .when(!(read && i !== this.step) && s.weight === "skim", (e) => e.text_color(t.muted)).child(s.title))
       .when(s.weight === "key", (e) => e.child(div().flex_none().px(4).h(15).flex().items_center().rounded(4).border_1().border_color(t.accent + "55")
         .text_size(9.5).font_semibold().text_color(t.accent).tooltip("Key change: the rest depends on it").child("KEY")));
     const total = v.steps.length, done = v.steps.filter((s) => isRead(s, this.read)).length;
@@ -1116,31 +1219,37 @@ export class Walkthrough {
       .child(div().px(8).pt(4).text_size(11).text_color(t.dim).child(`${done} of ${total} read`))
       .when(this.unreadOnly, (e) => e.child(h_flex().px(8).pt(8).gap(6).items_center().text_size(11).text_color(t.accent)
         .child(div().child("Unread only")).child(div().text_color(t.dim).child("· u shows all"))))
+      .child(groupTitle("Overview"))
+      .child(stepRow({ id: "recap", title: "Recap", position: "□" }, 0))
       .when(Boolean(this.taskView), (e) => {
         const tv = this.taskView;
         return e.child(h_flex().id("toc-task").mt(8).w_full().pl(6).pr(8).py(5).gap(8).items_center().rounded(6).cursor_pointer()
-          .border_l(2).border_color(this.step === -1 ? t.accent : "#00000000")
-          .when(this.step === -1, (el) => el.bg(t.accent + "1f"))
-          .when(this.step !== -1, (el) => el.hover((st) => st.bg(t.hover)))
-          .on_click((_e, cx) => { this.go(-1); cx.notify(); })
+          .border_l(2).border_color(this.step === this.pageIndex("task") ? t.accent : "#00000000")
+          .when(this.step === this.pageIndex("task"), (el) => el.bg(t.accent + "1f"))
+          .when(this.step !== this.pageIndex("task"), (el) => el.hover((st) => st.bg(t.hover)))
+          .on_click((_e, cx) => { this.go(this.pageIndex("task")); cx.notify(); })
           .tooltip(tv.total ? `${tv.met} of ${tv.total} request${tv.total === 1 ? "" : "s"} show up in this diff (t)` : "The task names nothing concrete (t)")
           .child(div().flex_none().size(18).rounded(5).flex().items_center().justify_center().bg(t.raised).text_size(10).text_color(t.accent).child("◎"))
           .child(div().flex_1().text_size(12.5).child("Task"))
           .child(div().text_size(11).text_color(tv.met < tv.total ? t.ansi3 : t.dim).child(tv.total ? `${tv.met} / ${tv.total}` : "—")));
       })
+      .when(pages.some((p) => p.kind === "contract"), (e) => e.child(groupTitle(contractStrings(this.contractLanguage()).contracts)))
+      .children(pages.flatMap((page, index) => page.kind === "contract" ? [
+        stepRow({ id: `contract-${page.contract.kind}`, title: page.title, position: "□" }, index),
+      ] : []))
       .children(parts.flatMap(({ part, steps }) => [
         h_flex().px(8).pt(12).pb(3).gap(8).items_center().text_size(10).font_semibold().text_color(t.dim)
           .child(div().flex_1().min_w(0).truncate().child(part.title.toUpperCase()))
           .child(div().flex_none().child(`${part.steps.filter((s) => isRead(s, this.read)).length} / ${part.steps.length}`)),
-        ...steps.map((s) => stepRow(s, s.position - 1)),
+        ...steps.map((s) => stepRow(s, this.pageIndex("step", s.id))),
       ]))
       .when(this.unreadOnly && !parts.length, (e) => e.child(div().px(8).pt(12).text_size(12).text_color(t.muted).child("Every step is read.")))
       .child(div().mt(8).mx(8).h(1).bg(t.border))
       .child(h_flex().id("toc-tail").mt(6).w_full().pl(6).pr(8).py(5).gap(8).items_center().rounded(6).cursor_pointer()
-        .border_l(2).border_color(this.step === v.steps.length ? t.accent : "#00000000")
-        .when(this.step === v.steps.length, (e) => e.bg(t.accent + "1f"))
+        .border_l(2).border_color(this.step === tailIndex ? t.accent : "#00000000")
+        .when(this.step === tailIndex, (e) => e.bg(t.accent + "1f"))
         .hover((st) => st.bg(t.hover))
-        .on_click((_e, cx) => { this.go(v.steps.length); cx.notify(); })
+        .on_click((_e, cx) => { this.go(tailIndex); cx.notify(); })
         .child(div().flex_none().w(18).text_center().text_size(11).text_color(t.dim).child("…"))
         .child(div().flex_1().text_size(12.5).text_color(t.muted).child("Not covered"))
         .child(div().text_size(11).text_color(fresh ? t.accent : t.dim).child(String(uncovered)))
@@ -1172,9 +1281,10 @@ export class Walkthrough {
         .when(s.weight === "key", (e) => e.child(chip(t, "Key change", t.accent, t.accent + "14").tooltip("The rest of the change depends on this, or its main behavior lives here. Read it closely.")))
         .when(s.weight === "skim", (e) => e.child(chip(t, "Context", null, t.raised).tooltip("A supporting change, here so the rest makes sense. Safe to skim.")))
         .when(s.outdated, (e) => e.child(chip(t, "Outdated", t.blocked, t.blocked + "14").tooltip("Code this step described has changed or is gone."))))
+      .when(Boolean(this.navigationFile), (e) => e.child(div().text_size(11.5).text_color(t.accent).child(`From blueprint: ${this.navigationFile}`)))
       .when(Boolean(this.taskView?.total), (e) => {
         const asks = asksOf(this.taskView, s);
-        const toTask = (id, el) => div().id(id).cursor_pointer().on_click((_e, cx) => { this.go(-1); cx.notify(); }).child(el);
+        const toTask = (id, el) => div().id(id).cursor_pointer().on_click((_e, cx) => { this.go(this.pageIndex("task")); cx.notify(); }).child(el);
         return e.child(h_flex().gap(6).flex_wrap().items_center().children(asks.length
           ? asks.map((a) => toTask(`for-${s.id}-${a.id}`, chip(t, `For: ${clip(a.text, 64)}`, t.ansi2, t.ansi2 + "12").tooltip(a.text)))
           : [toTask(`for-${s.id}-none`, chip(t, "Not tied to a request", null, t.raised).tooltip("No request in the task points at this step: supporting work, or work the task doesn't mention."))]));
@@ -1189,6 +1299,31 @@ export class Walkthrough {
       .when(s.found.length > 0, (e) => e.child(this.code(t, s.found)));
   }
 
+  /** Recap with a native, local diagram; source remains available on demand. */
+  recap(t) {
+    const w = this.shown.entry.walkthrough;
+    const available = Math.max(260, (this.width ?? 1000) - ((this.width ?? 1000) >= 720 ? 248 : 0) - 48);
+    const changeZoom = (factor, cx) => { this.diagramZoom = Math.max(0.5, Math.min(3, this.diagramZoom * factor)); cx.notify(); };
+    return v_flex().id(`recap-${this.shown.entry.generatedAt}`).flex_1().min_h(0).overflow_y_scrollbar().px(22).py(16).gap(10)
+      .child(div().text_size(18).font_semibold().child("Recap"))
+      .when(Boolean(w.recap), (e) => e.child(TextView.markdown("architecture-description", "### Architecture\n\n" + w.recap.architecture.description).selectable(true)))
+      .when(Boolean(w.recap), (el) => el
+        .child(h_flex().gap(6).items_center()
+          .child(button(t, "diagram-minus", "−", (_e, cx) => changeZoom(1 / 1.25, cx), { small: true, tooltip: "Zoom out" }))
+          .child(button(t, "diagram-plus", "+", (_e, cx) => changeZoom(1.25, cx), { small: true, tooltip: "Zoom in" }))
+          .child(button(t, "diagram-fit", "Fit", (_e, cx) => { this.diagramZoom = 1; cx.notify(); }, { small: true }))
+          .child(button(t, "diagram-source", this.diagramSource ? "Hide Mermaid" : "Mermaid source", (_e, cx) => { this.diagramSource = !this.diagramSource; cx.notify(); }, { small: true, kind: "ghost" })))
+        .child(blueprintView(w.recap.architecture, t, {
+          width: available, zoom: this.diagramZoom, fontFamily: settings().font_family,
+          files: this.diff?.files ?? [], selectedId: this.diagramSelected, fileTargets: (path) => this.blueprintTargets(path),
+          onSelect: (id, cx) => { this.diagramSelected = id; cx.notify(); },
+          onFile: (path, cx) => this.goToBlueprintFile(path, cx),
+          onClose: (cx) => { this.diagramSelected = null; cx.notify(); },
+        }))
+        .when(this.diagramSource, (e) => e.child(TextView.markdown("mermaid-source", "```mermaid\n" + mermaidWithConnections(w.recap.architecture.mermaid, w.recap.architecture.connections, w.recap.architecture.groups) + "\n```").selectable(true))))
+      .child(TextView.markdown("recap-body", recapMarkdown(w.recap, { diagram: false, architecture: false }).replace("### Recap", "### Changes and motivations")).selectable(true));
+  }
+
   /** Everything no step covers, file by file, each with the model's one-line note. */
   tail(t) {
     const v = this.view;
@@ -1197,14 +1332,14 @@ export class Walkthrough {
       .child(div().max_w(820).text_size(12.5).text_color(t.muted).child(v.uncovered.length
         ? "Changes no step describes: edits made after the walkthrough was written, ones the model judged routine, generated and binary files, and files too large to read. Open a file to see its hunks."
         : "Every change is covered by a step."))
-      .children(v.uncovered.map(({ file, hunks, note }) => {
+      .children([...v.uncovered].sort((a, b) => Number(b.file.path === this.navigationFile) - Number(a.file.path === this.navigationFile)).map(({ file, hunks, note }) => {
         const id = `${file.scope}:${file.path}`;
         const open = this.openFiles.has(id);
         const twice = v.uncovered.filter((u) => u.file.path === file.path).length > 1;
         const added = hunks.reduce((n, h) => n + h.added, 0), deleted = hunks.reduce((n, h) => n + h.deleted, 0);
         const fresh = hunks.filter((h) => !hunkRead(h.id, this.read)).length;
         const all = { hunkIds: hunks.map((h) => h.id) };
-        return v_flex().rounded(8).border_1().border_color(fresh ? t.accent : t.border)
+        return v_flex().rounded(8).border_1().border_color(file.path === this.navigationFile || fresh ? t.accent : t.border)
           .child(h_flex().pr(8).gap(8).items_center()
             .child(h_flex().id(`tail-${id}`).flex_1().min_w(0).px(10).py(6).gap(8).items_center().when(hunks.length > 0, (e) => e.cursor_pointer().hover((st) => st.bg(t.hover)))
               .on_click((_e, cx) => { if (!hunks.length) return; open ? this.openFiles.delete(id) : this.openFiles.add(id); cx.notify(); })
@@ -1245,7 +1380,7 @@ export class Walkthrough {
       if (opened) {
         const sum = totals.get(file.path);
         rows.push(h_flex().mt(rows.length ? 10 : 0).h(28).px(12).gap(8).items_center().bg(t.raised).border_b(1).border_color(t.border)
-          .child(div().flex_1().min_w(0).truncate().text_size(12).font_semibold().child(file.path))
+          .child(div().flex_1().min_w(0).truncate().text_size(12).font_semibold().when(file.path === this.navigationFile, (e) => e.text_color(t.accent)).child(file.path))
           .when(twice.has(file.path) || (file.scope === "staged" && this.scope === "uncommitted"), (e) => e.child(chip(t, scopeName(file.scope))))
           .when(file.status !== "modified", (e) => e.child(div().text_size(11).text_color(t.dim).child(file.oldPath ? `${file.status} from ${file.oldPath}` : file.status)))
           .when(Boolean(sum?.added), (e) => e.child(div().text_size(11.5).text_color(t.ansi2).child(`+${sum.added}`)))
@@ -1317,14 +1452,14 @@ export class Walkthrough {
   }
 
   footer(t) {
-    const steps = this.view.steps.length;
+    const steps = this.view.steps.length, pages = this.pages(), page = pages[this.step], next = pages[this.step + 1];
     const read = this.view.steps.filter((s) => isRead(s, this.read)).length;
     const agent = this.agent();
     const n = this.ownComments().length;
     return h_flex().h(44).flex_none().px(14).gap(8).items_center().border_t(1).border_color(t.border)
-      .child(button(t, "prev", this.step === 0 && this.taskView ? "← Task" : "← Previous", (_e, cx) => { this.move(-1); cx.notify(); }, { small: true, disabled: this.step <= this.firstPage() }))
-      .child(button(t, "next", this.step < 0 ? "First step →" : this.step === steps - 1 ? "Not covered →" : "Next →", (_e, cx) => { this.move(1); cx.notify(); }, { small: true, disabled: this.step >= steps }))
-      .child(div().text_size(11.5).text_color(t.dim).child(this.step < steps ? `${read} / ${steps} read · ← → to move` : `End of the walkthrough · ${read} / ${steps} read`))
+      .child(button(t, "prev", "← Previous", (_e, cx) => { this.move(-1); cx.notify(); }, { small: true, disabled: this.step === 0 }))
+      .child(button(t, "next", next && next.kind !== "step" ? `${next.title} →` : "Next →", (_e, cx) => { this.move(1); cx.notify(); }, { small: true, disabled: this.step >= pages.length - 1 }))
+      .child(div().text_size(11.5).text_color(t.dim).child(page?.kind === "tail" ? `End of the walkthrough · ${read} / ${steps} read` : page?.kind === "step" ? `${read} / ${steps} read · ← → to move` : `${page?.title ?? ""} · ← → to move`))
       .child(button(t, "unread-only", this.unreadOnly ? "Show all" : "Unread only", (_e, cx) => { this.unreadOnly = !this.unreadOnly; cx.notify(); },
         { kind: "ghost", small: true, tooltip: this.unreadOnly ? "List every step again (u)" : "List and step through only the steps not read yet (u)" }))
       .child(div().flex_1())

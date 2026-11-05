@@ -223,7 +223,7 @@ export async function saveRead(top, read, keys) {
 
 /** The prompt that would be sent, to size it before anything is spent. */
 export function preparePrompt(diff, { language, previous, preferences = "", task = null }) {
-  return buildPrompt({ digest: diff.text, fileCount: diff.fileCount, hunkCount: diff.hunkCount, what: diff.what, language, previous, preferences, task });
+  return buildPrompt({ digest: diff.text + (diff.generatedPaths.length ? "\n\nGenerated files changed (contents not read; include their limited visibility in recap):\n" + diff.generatedPaths.map((p) => JSON.stringify(p)).join("\n") : ""), fileCount: diff.fileCount, hunkCount: diff.hunkCount, what: diff.what, language, previous, preferences, task });
 }
 
 export const promptChars = (p) => p.system.length + p.prompt.length;
@@ -248,7 +248,7 @@ export async function startJob(repo, diff, { key, model, language, prompt, sourc
   await exec("mkdir", ["-p", dir]);
   const meta = {
     key, code: codeKey(diff.files), model, language, top: repo.top, source, sk: diff.sk, started: Date.now(), deadline: Date.now() + deadline(diff.hunkCount),
-    idByAlias: diff.idByAlias, digestFiles: diff.digestFiles, hunkCount: diff.hunkCount, auto, before,
+    idByAlias: diff.idByAlias, digestFiles: [...diff.digestFiles, ...diff.generatedPaths.map((path) => ({ path, aliases: [] }))], hunkCount: diff.hunkCount, auto, before,
     // Kept with the walkthrough: where its task came from, and the key that tells when the task has changed since.
     task: task ? { from: task.from, label: task.label, short: task.short, text: task.text, context: task.context ?? "", key: taskKey(task) } : null,
   };
@@ -320,6 +320,8 @@ export async function finishJob(job) {
   try {
     const { raw, cost } = readOutcome({ out: await read("out.json"), err: await read("err.txt"), code: job.code });
     const walkthrough = normalize(raw, job.meta.idByAlias, job.meta.digestFiles, { asks: Boolean(job.meta.task) });
+    if (!Array.isArray(raw.contracts)) throw new Error("The generated report omitted the Schema/API assessment. Regenerate it.");
+    if (!walkthrough.recap) throw new Error("The generated report has no recap. Regenerate to include changes, motivations and architecture.");
     const { key, model, language, top, source, sk } = job.meta;
     // `before`: the hunks of the walkthrough shown when this one was asked for, to tell what changed since it was read.
     const entry = { version: VERSION, key, code: job.meta.code, model, language, top, source, sk, generatedAt: Date.now(), took: Date.now() - job.meta.started, cost, walkthrough, before: job.meta.before ?? [], task: job.meta.task ?? null };
