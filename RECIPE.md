@@ -8,26 +8,24 @@ change and never judges it.
 
 ![Walkthrough](preview.png)
 
-## Fork additions
+## Recap, blueprint and contracts
 
-This fork is based on upstream 0.8.1, including persistent read tracking, Last turn, task mapping,
-interface updates and UTF-8 clipboard fixes. Install from `singerxt/herdr-walkthrough`, branch
-`blueprint-contracts`; the `main` branch retains upstream code.
+The first page is Recap, with a native interactive blueprint. The optional Task page
+follows Recap. Components show validated change status, role and changes, source-file
+navigation, connection labels and evidence-based groups. Selecting a component highlights
+its direct connections; Show all clears that focus. Source-file links navigate to the
+matching reading section, or to the relevant Contract or Not covered page.
 
-The first page is Recap, with a native interactive blueprint. The optional Task page follows Recap. Components can show validated
-change status, source-file navigation, connection labels and evidence-based groups.
-Selecting a component highlights its direct connections; Show all clears that focus.
+Conditional database, Protobuf and API contract pages follow Recap and Task before the
+code steps. Each change has a before/after comparison, its own exact source diff toggle
+and links to matching walkthrough steps. Stale source and changes without a matching step
+are marked. Contract UI and Markdown labels follow the selected/saved report language;
+generation explicitly requests the chosen language. Existing wrong-language prose needs
+regeneration. Older reports remain readable; new metadata requires regeneration.
 
-Conditional database, Protobuf and API contract pages follow Recap before the code steps.
-Each change has a before/after comparison, its own exact source diff toggle and links to
-matching walkthrough steps. Stale source and changes without a matching step are marked.
-Contract UI and Markdown labels follow the selected/saved report language; generation
-explicitly requests the chosen language. Existing wrong-language prose needs regeneration.
-
-Copy only `mods/walkthrough` when installing; merge `keys.json` with existing shortcuts,
-then run `herdr-app check`. Do not replace unrelated mods or shortcut entries. New
-blueprint metadata and contract pages require report regeneration; older reports remain
-readable. The detailed upstream behavior below describes the upstream 0.8.1 foundation.
+All pages share one reading order. Persistent hunk read tracking counts only code steps;
+unread-only navigation retains Recap, Task, Contracts and Not covered. The toolbar's source
+and model/language controls stack at narrow widths to avoid overlapping.
 
 ## What you see
 

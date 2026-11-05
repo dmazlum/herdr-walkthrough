@@ -1,6 +1,6 @@
 # ◆ Walkthrough
 
-[![CI](https://github.com/singerxt/herdr-walkthrough/actions/workflows/ci.yml/badge.svg?branch=blueprint-contracts)](https://github.com/singerxt/herdr-walkthrough/actions/workflows/ci.yml)
+[![CI](https://github.com/dmazlum/herdr-walkthrough/actions/workflows/ci.yml/badge.svg)](https://github.com/dmazlum/herdr-walkthrough/actions/workflows/ci.yml)
 
 **Read a change in the order it makes sense, not in the order of its file names.**
 
@@ -10,33 +10,6 @@ one builds on the last, and explains what each step changes, with its code right
 
 It explains; it doesn't judge. No findings, no scores, no verdicts.
 
-## This fork
-
-This is Mateusz's customized fork of
-[dmazlum/herdr-walkthrough](https://github.com/dmazlum/herdr-walkthrough), based on upstream
-**0.8.1**. The default branch is **`blueprint-contracts`**. It includes upstream persistent
-read tracking, Last turn, task mapping,
-interface improvements and UTF-8 clipboard fixes. Recap stays first; Task and Contracts
-follow it before the code steps. Upstream `main` is retained separately.
-
-- **Recap first.** A summary of the change and a native blueprint of its architecture.
-- **Interactive blueprint.** Source-backed component status and details, connection labels,
-  evidence-based groups, and focus on a selected component and its direct connections.
-  File links jump to the relevant walkthrough section.
-- **Contracts.** Dedicated database, Protobuf and API pages when the diff changes those
-  contracts, with before/after comparisons, compatibility impact and deployment order
-  when supported by the diff.
-- **Evidence per change.** Open the exact supporting diff or jump to every walkthrough
-  step that explains it. Missing source and changes without a matching step are marked.
-- **Selected language respected.** Contract controls and exported labels support all
-  fourteen selectable languages, and generated explanations follow the selected language.
-
-Older reports remain readable. Regenerate them to add blueprint metadata or contract pages,
-or to replace explanations generated in the wrong language. Source toggles and step links
-work with existing reports that already contain the required evidence.
-
-The screenshot below shows the upstream interface; this fork adds the blueprint and Contracts.
-
 ![Walkthrough](preview.png)
 
 ## Quick start
@@ -44,8 +17,8 @@ The screenshot below shows the upstream interface; this fork adds the blueprint 
 You need the **Herdr desktop app 0.1.9+**, **git**, and **Claude Code** (`claude`, logged in).
 
 1. **Install.** In Herdr, ask your agent:
-   *"Add the mod github.com/singerxt/herdr-walkthrough from blueprint-contracts"*.
-   To do it by hand, see [Install by hand](#install-by-hand).
+   *"Add the mod github.com/dmazlum/herdr-walkthrough"*. It's also listed at
+   [herdr.dev/mods](https://herdr.dev/mods). To do it by hand, see [Install by hand](#install-by-hand).
 2. **Open it.** Focus a terminal in a git repository and press **⌘⇧K**.
 3. **Pick what to read** (Uncommitted, Branch, a Pull request, the agent's Last turn…)
    and press **Generate**. A small change costs about $0.002 with Haiku.
@@ -54,6 +27,25 @@ Then read with **←** and **→**. Want the agent's last turn written up for yo
 click? Add the two [Last turn hooks](#last-turn).
 
 ## What you get
+
+### Architecture overview and contracts
+
+The first page is **Recap**: what changed, why, and a native architecture blueprint.
+Select a component to inspect its role, change status and source files, or focus on its
+direct connections. Source-backed labels explain connections, and groups show evidenced
+architecture boundaries. File links jump to the walkthrough section that explains them.
+
+When the diff changes a database schema, Protobuf definition or public API contract,
+**Contracts** pages follow Recap and the optional Task page. Each change shows before/after
+excerpts, compatibility impact, deployment order when established, its exact supporting
+diff and links to matching code steps. Missing evidence and changes without a matching
+step are marked. Contract controls and exported labels support all fourteen selectable
+languages; generated explanations follow the chosen language.
+
+Older reports remain readable. Regenerate them to add blueprint metadata or contract pages,
+or to replace explanations generated in the wrong language. Source toggles and step links
+work with existing reports that already contain the required evidence. Read tracking,
+Last turn and task mapping work across the additional pages.
 
 ### A diff you can read top to bottom
 
@@ -244,7 +236,7 @@ when more were sent since.
 ## Install by hand
 
 ```sh
-git clone --branch blueprint-contracts https://github.com/singerxt/herdr-walkthrough
+git clone https://github.com/dmazlum/herdr-walkthrough
 cp -R herdr-walkthrough/mods/walkthrough ~/.config/herdr-app/mods/
 herdr-app check ~/.config/herdr-app/mods/walkthrough
 ```
@@ -256,12 +248,12 @@ Then merge [`keys.json`](keys.json) into `~/.config/herdr-app/keys.json` for **�
 
 Herdr doesn't update mods you added yourself. To hear about new versions, watch this repo
 for releases (**Watch → Custom → Releases**). Each
-[release](https://github.com/singerxt/herdr-walkthrough/releases) says what changed, and
+[release](https://github.com/dmazlum/herdr-walkthrough/releases) says what changed, and
 whether `keys.json` did.
 
 Your version is `"version"` in `~/.config/herdr-app/mods/walkthrough/mod.json`. To update,
 ask your agent to *replace* that folder with the latest `mods/walkthrough` from
-`github.com/singerxt/herdr-walkthrough`. Asking it to add the mod again isn't enough: it
+`github.com/dmazlum/herdr-walkthrough`. Asking it to add the mod again isn't enough: it
 would add a second copy under a new name. Or by hand:
 
 ```sh
