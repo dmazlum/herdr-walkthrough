@@ -6,10 +6,10 @@ import { execFile } from "node:child_process";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { repoAt, currentHead, loadSections, defaultBase, baseChoices, recentCommits, sourceKey, describe, MAX_UNTRACKED_BYTES, pullRequests, ghError } from "../mods/walkthrough/lib/sources.js";
+import { repoAt, currentHead, loadSections, defaultBase, baseChoices, recentCommits, sourceKey, describe, MAX_UNTRACKED_BYTES, pullRequests, ghError, turnsKey } from "../mods/walkthrough/lib/sources.js";
 import { buildDigest } from "../mods/walkthrough/lib/digest.js";
 import { jobScript, readOutcome } from "../mods/walkthrough/lib/job.js";
-import { chmodSync, readFileSync, existsSync } from "node:fs";
+import { chmodSync, readFileSync, existsSync, utimesSync } from "node:fs";
 
 const exec = (cmd, args, { cwd } = {}) => new Promise((resolve) => execFile(cmd, args, { cwd, maxBuffer: 1 << 26 },
   (e, stdout, stderr) => resolve({ code: e ? (typeof e.code === "number" ? e.code : 1) : 0, stdout, stderr })));
@@ -231,7 +231,185 @@ test("open pull requests, newest update first, the current branch's marked", asy
   ];
   const { exec, calls } = fakeGh({ "pr list": JSON.stringify(list) });
   const prs = await pullRequests(exec, "/repo", "feature");
-  assert.match(calls[0], /^gh pr list --state open --limit 50 --json number,title,headRefName,baseRefName,author,isDraft,updatedAt$/);
+  assert.match(calls[0], /^gh pr list --state open --limit 50 --json number,title,body,headRefName,baseRefName,author,isDraft,updatedAt$/);
   assert.deepEqual(prs.map((p) => [p.number, p.author, p.draft, p.current]), [[2, "y", true, true], [1, "x", false, false]]);
   await assert.rejects(pullRequests(fakeGh({ "pr list": "not json" }).exec, "/repo"), /something other than a list/);
+});
+
+// ——— Last turn: hooks/turn.sh against a real repository ———
+
+import { spawnSync } from "node:child_process";
+import { readdirSync, statSync } from "node:fs";
+import { parseListing, resolveEnds, turnSource, LISTING } from "../mods/walkthrough/lib/turns.js";
+
+const TURN_SH = new URL("../mods/walkthrough/hooks/turn.sh", import.meta.url).pathname;
+
+/** Every file under .git/objects with its size and time, and the index's bytes: what a snapshot must leave alone. */
+function gitState(repo) {
+  const files = [];
+  const walk = (d) => { for (const n of readdirSync(d)) { const p = join(d, n); statSync(p).isDirectory() ? walk(p) : files.push(`${p}:${statSync(p).size}:${statSync(p).mtimeMs}`); } };
+  walk(join(repo, ".git/objects"));
+  return { objects: files.sort(), index: readFileSync(join(repo, ".git/index")).toString("base64") };
+}
+
+test("a turn: the hooks snapshot before and after, and the turn reads as exactly what changed in between", async () => {
+  const repo = realpathSync(mkdtempSync(join(tmpdir(), "walkthrough-turn-")));
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "walkthrough-home-")));
+  await sh(repo, "init", "-q", "-b", "main");
+  await sh(repo, "config", "user.email", "t@t");
+  await sh(repo, "config", "user.name", "t");
+  // The commit's own background maintenance would come and go under .git/objects while it is compared.
+  await sh(repo, "config", "maintenance.auto", "false");
+  await sh(repo, "config", "gc.auto", "0");
+  writeFileSync(join(repo, "a.txt"), "one\ntwo\n");
+  writeFileSync(join(repo, "keep.txt"), "kept\n");
+  await sh(repo, "add", "-A");
+  await sh(repo, "commit", "-qm", "first");
+  // Work from before the turn is not the turn's.
+  writeFileSync(join(repo, "keep.txt"), "edited before the turn\n");
+  writeFileSync(join(repo, "early.txt"), "new before the turn\n");
+  const before = gitState(repo);
+  const hook = (event, input) => spawnSync("sh", [TURN_SH, event], { input: JSON.stringify(input), encoding: "utf8", env: { ...process.env, HOME: home, HC_TERMINAL_ID: "t1" } });
+
+  assert.equal(hook("start", { session_id: "s1", cwd: join(repo), hook_event_name: "UserPromptSubmit", prompt: "Make two TWO" }).status, 0);
+  writeFileSync(join(repo, "a.txt"), "one\nTWO\n");
+  writeFileSync(join(repo, "added.txt"), "added in the turn\n");
+  writeFileSync(join(repo, "huge.log"), "x".repeat(MAX_UNTRACKED_BYTES + 10));
+  mkdirSync(join(repo, "sub"));
+  const listed = () => {
+    const base = join(home, ".herdr/walkthrough/turns");
+    const folder = join(base, readdirSync(base).find((n) => !n.startsWith("input.")));
+    return resolveEnds(parseListing(spawnSync("sh", ["-c", LISTING, folder], { encoding: "utf8" }).stdout, folder));
+  };
+  const read = async (turn) => buildDigest((await loadSections(exec, repo, turnSource(turn))).sections).files.map((f) => `${f.scope}:${f.path}:${f.status}`);
+
+  // Still running: read up to now.
+  const [running] = listed();
+  assert.equal(running.state, "running");
+  assert.equal(running.prompt, "Make two TWO");
+  assert.deepEqual(await read(running), ["turn:a.txt:modified", "turn:added.txt:added"]);
+  const unread = async (turn) => (await loadSections(exec, repo, turnSource(turn))).unread;
+  assert.deepEqual(await unread(running), [{ path: "huge.log", why: "Not read: larger than 1 MB." }]);
+
+  assert.equal(hook("stop", { session_id: "s1", cwd: repo, hook_event_name: "Stop" }).status, 0);
+  writeFileSync(join(repo, "after.txt"), "after the turn\n");
+  const [done] = listed();
+  assert.equal(done.state, "done");
+  assert.equal(done.terminal, "t1");
+  assert.deepEqual(await read(done), ["turn:a.txt:modified", "turn:added.txt:added"]);
+  assert.deepEqual(await unread(done), [{ path: "huge.log", why: "Not read: larger than 1 MB." }]);
+  assert.equal(sourceKey(turnSource(done)), `turn:${done.id}`);
+  assert.match(describe(turnSource(done)), /answered the prompt "Make two TWO"/);
+
+  // Neither the hooks nor the reads wrote to the repository's index or objects.
+  assert.deepEqual(gitState(repo), before);
+  const status = (await exec("git", ["status", "--porcelain"], { cwd: repo })).stdout.split("\n").filter(Boolean);
+  assert.deepEqual(status, [" M a.txt", " M keep.txt", "?? added.txt", "?? after.txt", "?? early.txt", "?? huge.log"]);
+  rmSync(repo, { recursive: true, force: true });
+  rmSync(home, { recursive: true, force: true });
+});
+
+/** A throwaway repository, the hook run in it, and its turns read back. */
+async function turnRepo({ init = [], config = [] } = {}) {
+  const repo = realpathSync(mkdtempSync(join(tmpdir(), "walkthrough-turn-")));
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "walkthrough-home-")));
+  await sh(repo, "init", "-q", "-b", "main", ...init);
+  for (const [k, v] of [["user.email", "t@t"], ["user.name", "t"], ["maintenance.auto", "false"], ...config]) await sh(repo, "config", k, v);
+  writeFileSync(join(repo, "a.txt"), "a\n");
+  await sh(repo, "add", "-A");
+  await sh(repo, "commit", "-qm", "first");
+  const hook = (event) => assert.equal(spawnSync("sh", [TURN_SH, event], { input: JSON.stringify({ session_id: "s", cwd: repo, prompt: "p" }), encoding: "utf8", env: { ...process.env, HOME: home } }).status, 0);
+  const base = join(home, ".herdr/walkthrough/turns");
+  const turns = () => {
+    const folder = join(base, readdirSync(base).find((n) => !n.startsWith("input.")));
+    return resolveEnds(parseListing(spawnSync("sh", ["-c", LISTING, folder], { encoding: "utf8" }).stdout, folder));
+  };
+  const files = async (turn) => {
+    const { sections, unread } = await loadSections(exec, repo, turnSource(turn));
+    return { files: buildDigest(sections).files.map((f) => `${f.path}:${f.status}`), unread: unread.map((u) => u.path) };
+  };
+  const done = () => { rmSync(repo, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }); };
+  return { repo, base, hook, turns, files, done };
+}
+
+test("a new file that grows past 1 MB during a turn is listed unread, not shown unchanged or deleted", async () => {
+  const r = await turnRepo();
+  writeFileSync(join(r.repo, "data.json"), "{}\n");
+  r.hook("start");
+  writeFileSync(join(r.repo, "data.json"), "x".repeat(MAX_UNTRACKED_BYTES + 10));
+  writeFileSync(join(r.repo, "a.txt"), "A\n");
+  assert.deepEqual(await r.files(r.turns()[0]), { files: ["a.txt:modified"], unread: ["data.json"] });
+  r.hook("stop");
+  const [turn] = r.turns();
+  assert.equal(turn.state, "done");
+  assert.deepEqual(await r.files(turn), { files: ["a.txt:modified"], unread: ["data.json"] });
+  // A file that was already that big when the turn began is no news.
+  r.hook("start");
+  writeFileSync(join(r.repo, "a.txt"), "AA\n");
+  r.hook("stop");
+  assert.deepEqual(await r.files(r.turns()[0]), { files: ["a.txt:modified"], unread: [] });
+  r.done();
+});
+
+test("the mod names a SHA-256 repository's turns folder as the hook does", async () => {
+  const r = await turnRepo({ init: ["--object-format=sha256"] });
+  r.hook("start");
+  writeFileSync(join(r.repo, "a.txt"), "b\n");
+  r.hook("stop");
+  const key = await turnsKey(exec, r.repo);
+  assert.ok(existsSync(join(r.base, key)), `${key} in ${readdirSync(r.base)}`);
+  assert.deepEqual((await r.files(r.turns()[0])).files, ["a.txt:modified"]);
+  r.done();
+});
+
+test("a copied index git can't use (split, or broken): the hook and the mod's own snapshot both start over without it", async () => {
+  const r = await turnRepo({ config: [["core.splitIndex", "true"]] });
+  await sh(r.repo, "update-index", "--split-index");
+  r.hook("start");
+  writeFileSync(join(r.repo, "a.txt"), "changed\n");
+  writeFileSync(join(r.repo, "n.txt"), "new\n");
+  const [running] = r.turns();
+  assert.equal(running.state, "running");
+  assert.deepEqual((await r.files(running)).files, ["a.txt:modified", "n.txt:added"]);
+  // Whatever makes the copy unusable, the snapshot drops it and starts over.
+  writeFileSync(join(running.dir, "now.index"), "not an index");
+  assert.deepEqual((await r.files(running)).files, ["a.txt:modified", "n.txt:added"]);
+  writeFileSync(join(running.dir, "index"), "not an index");
+  r.hook("stop");
+  assert.deepEqual((await r.files(r.turns()[0])).files, ["a.txt:modified", "n.txt:added"]);
+  r.done();
+});
+
+test("when every copy of the repository's index is one git can't use, the mod's own snapshot starts over without one, as the hook does", async () => {
+  const r = await turnRepo();
+  r.hook("start");
+  writeFileSync(join(r.repo, "a.txt"), "changed\n");
+  writeFileSync(join(r.repo, "n.txt"), "new\n");
+  const [running] = r.turns();
+  // Each copy (`cp -p <real> <index>`) comes out unreadable.
+  const broken = (cmd, args, opts) => cmd === "sh" && /cp -p/.test(args[1]) ? exec("sh", ["-c", 'printf "not an index" > "$0"', args[3]], opts) : exec(cmd, args, opts);
+  const { sections } = await loadSections(broken, r.repo, turnSource(running));
+  assert.deepEqual(buildDigest(sections).files.map((f) => `${f.path}:${f.status}`), ["a.txt:modified", "n.txt:added"]);
+  r.done();
+});
+
+test("a turn that can't be read says why: its folder was dropped, or git gc removed what its snapshots left to the repository", async () => {
+  const r = await turnRepo();
+  // Staged, never committed: the snapshot names the repository's object for it and keeps no copy.
+  writeFileSync(join(r.repo, "staged.txt"), "staged\n");
+  utimesSync(join(r.repo, "staged.txt"), 1, 1); // older than the index, or git hashes it again (racy git) and the turn keeps a copy
+  await sh(r.repo, "add", "staged.txt");
+  const blob = await sh(r.repo, "rev-parse", ":staged.txt");
+  r.hook("start");
+  writeFileSync(join(r.repo, "staged.txt"), "changed in the turn\n");
+  r.hook("stop");
+  const [turn] = r.turns();
+  assert.deepEqual((await r.files(turn)).files, ["staged.txt:modified"]);
+  // Unstaged, then pruned, as `git gc` would once nothing names it.
+  await sh(r.repo, "reset", "-q", "--", "staged.txt");
+  rmSync(join(r.repo, ".git/objects", blob.slice(0, 2), blob.slice(2)));
+  await assert.rejects(r.files(turn), /git gc has removed/);
+  rmSync(turn.dir, { recursive: true, force: true });
+  await assert.rejects(r.files(turn), /only the newest 20 turns are kept/);
+  r.done();
 });

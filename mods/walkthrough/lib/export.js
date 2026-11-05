@@ -69,14 +69,17 @@ export function contractMarkdown(page, language = "en") {
  * @param {ReturnType<typeof import("./walkthrough.js").overlay>} view the walkthrough over the diff as it is now
  * @param {{ title: string, summary: string }} walkthrough the stored walkthrough
  * @param {{ what?: string, model?: string, language?: string, cost?: number | null }} meta
+ * @param {ReturnType<typeof import("./walkthrough.js").overlayAsks>} [task] the task's requests over the same view; null leaves them out
+ * @param {string} [taskLabel] where the task came from, for the reader
  */
-export function toMarkdown(view, walkthrough, { what = "", model = "", language = "", cost = null } = {}) {
-  const out = [`## ${line(walkthrough.title) || "Walkthrough"}`, ""];
+export function toMarkdown(view, walkthrough, { what = "", model = "", language = "", cost = null } = {}, task = null, taskLabel = "") {
+  // The bounds let a walkthrough pasted into a pull request's description be left out when that description is read as a task.
+  const out = [MARK_START, `## ${line(walkthrough.title) || "Walkthrough"}`, ""];
   if (walkthrough.summary?.trim()) out.push(walkthrough.summary.trim(), "");
   const about = [what && line(what), model, language, typeof cost === "number" ? `$${cost.toFixed(cost < 0.1 ? 3 : 2)}` : ""].filter(Boolean);
   if (about.length) out.push(`<sub>${about.join(" · ")}</sub>`, "");
-
   if (walkthrough.recap) out.push(recapMarkdown(walkthrough.recap));
+  if (task) out.push(...taskMarkdown(task, taskLabel));
   for (const page of walkthrough.contracts ?? []) out.push(contractMarkdown(page, language));
 
   for (const part of view.parts) {
@@ -101,6 +104,29 @@ export function toMarkdown(view, walkthrough, { what = "", model = "", language 
     }
     out.push("");
   }
-  return `${out.join("\n").trimEnd()}\n`;
+  return `${out.join("\n").trimEnd()}\n${MARK_END}\n`;
+}
+
+export const MARK_START = "<!-- walkthrough -->", MARK_END = "<!-- /walkthrough -->";
+
+const stepList = (steps) => (steps.length === 1 ? `step ${steps[0].position}` : `steps ${steps.map((s) => s.position).join(", ")}`);
+
+/** The task's requests, each with where it shows up; then the steps no request points at. */
+function taskMarkdown(task, label) {
+  const out = ["### Task", ""];
+  if (label) out.push(`<sub>${line(label)}</sub>`, "");
+  if (!task.asks.length) return [...out, "_The task names nothing concrete to match against the change._", ""];
+  for (const a of task.asks) {
+    const where = [
+      a.coverage === "absent" ? "not in this diff" : a.coverage === "partly" ? "partly" : "",
+      a.steps.length ? stepList(a.steps) : "",
+      a.tail ? "Not covered" : "",
+      a.outdated ? "_outdated_" : "",
+    ].filter(Boolean);
+    out.push(`- ${a.coverage === "seen" ? "✓" : a.coverage === "partly" ? "◐" : "○"} ${line(a.text)}${where.length ? ` — ${where.join(", ")}` : ""}`);
+  }
+  out.push("");
+  if (task.outside.length) out.push(`Not tied to any request: ${stepList(task.outside)}.`, "");
+  return out;
 }
 

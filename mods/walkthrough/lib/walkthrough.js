@@ -13,11 +13,13 @@ import { parseMermaid } from "./diagram.js";
 
 export const VERSION = 1;
 // Part of every cache key: a different prompt writes a different walkthrough.
-export const PROMPT_VERSION = 7;
+export const PROMPT_VERSION = 8;
 
-export const LIMITS = { parts: 6, steps: 16, hunksPerStep: 14, partTitle: 28, notes: 6, notesPerStep: 2, skipped: 200 };
+export const LIMITS = { parts: 6, steps: 16, hunksPerStep: 14, partTitle: 28, notes: 6, notesPerStep: 2, skipped: 200, asks: 12, askText: 200 };
 export const WEIGHTS = ["key", "normal", "skim"];
 export const NOTE_KINDS = ["choice", "upkeep", "gap", "divergence", "untested"];
+// How much of a request in the task the diff carries out: all of it, part of it, or none of it that can be seen here.
+export const COVERAGE = ["seen", "partly", "absent"];
 
 const str = { type: "string" };
 export const SCHEMA = {
@@ -86,6 +88,27 @@ export const SCHEMA = {
   },
 };
 
+/** The shape asked for: with a task, the requests it makes and the hunks that carry each out. */
+export function schemaFor(withTask) {
+  if (!withTask) return SCHEMA;
+  return {
+    ...SCHEMA,
+    required: [...SCHEMA.required, "asks"],
+    properties: {
+      ...SCHEMA.properties,
+      asks: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["text", "hunks", "coverage"],
+          properties: { text: str, hunks: { type: "array", items: str }, coverage: { type: "string", enum: COVERAGE } },
+        },
+      },
+    },
+  };
+}
+
 const text = (value, max = 0) => {
   if (typeof value !== "string") return "";
   const t = value.trim();
@@ -94,13 +117,17 @@ const text = (value, max = 0) => {
 
 const fail = (message) => Object.assign(new Error(message), { code: "invalid" });
 
+/** The hunk id an alias the model wrote ("h3", "[h3]") stands for, or undefined. */
+const idOf = (idByAlias, alias) => idByAlias[typeof alias === "string" ? alias.trim().replace(/^\[|\]$/g, "") : ""];
+
 /**
  * A model's answer → a walkthrough whose steps hold real hunk ids.
  * @param {any} raw the parsed answer
  * @param {Record<string, string>} idByAlias from the digest
  * @param {{ path: string, aliases: string[] }[]} digestFiles from the digest, to place skipped notes
+ * @param {{ asks?: boolean }} options asks: a task was given, so its requests are read (else `asks` is null)
  */
-export function normalize(raw, idByAlias, digestFiles = []) {
+export function normalize(raw, idByAlias, digestFiles = [], { asks: withTask = false } = {}) {
   if (!raw || typeof raw !== "object") throw fail("The model returned no walkthrough.");
   const used = new Set();
   let steps = 0, notes = 0, dropped = 0;
@@ -115,7 +142,7 @@ export function normalize(raw, idByAlias, digestFiles = []) {
       if (!rawStep || typeof rawStep !== "object") continue;
       const hunkIds = [];
       for (const alias of Array.isArray(rawStep.hunks) ? rawStep.hunks : []) {
-        const id = idByAlias[typeof alias === "string" ? alias.trim().replace(/^\[|\]$/g, "") : ""];
+        const id = idOf(idByAlias, alias);
         if (!id) { dropped++; continue; }
         // A hunk is told once; a second mention would draw the same code twice.
         if (used.has(id) || hunkIds.includes(id) || hunkIds.length >= LIMITS.hunksPerStep) continue;
@@ -162,7 +189,8 @@ export function normalize(raw, idByAlias, digestFiles = []) {
 
   const recap = normalizeRecap(raw.recap, digestFiles, idByAlias);
   const contracts = normalizeContracts(raw.contracts, idByAlias, digestFiles);
-  return { recap, contracts, title: text(raw.title, 140) || "Walkthrough", summary: text(raw.summary), parts, skipped, dropped };
+  const asks = withTask ? normalizeAsks(raw.asks, idByAlias) : null;
+  return { recap, contracts, asks, title: text(raw.title, 140) || "Walkthrough", summary: text(raw.summary), parts, skipped, dropped };
 }
 
 /** Legacy reports stay readable; new structured recaps must be complete. */
@@ -190,6 +218,62 @@ function normalizeRecap(raw, files, idByAlias) {
 
 /** A deliberately small, portable Mermaid flowchart subset. */
 export function validateMermaid(source) { parseMermaid(source); }
+
+/**
+ * The task's requests, each with real hunk ids. Coverage follows the hunks,
+ * not the model's word alone: a request with no hunk found in the digest is
+ * "absent" whatever it was called, and one called absent that names hunks
+ * is "partly". A hunk may serve several requests.
+ */
+function normalizeAsks(rawAsks, idByAlias) {
+  const asks = [];
+  for (const a of Array.isArray(rawAsks) ? rawAsks : []) {
+    if (asks.length >= LIMITS.asks) break;
+    const body = text(a?.text, LIMITS.askText);
+    if (!body) continue;
+    const hunkIds = [];
+    for (const alias of Array.isArray(a.hunks) ? a.hunks : []) {
+      const id = idOf(idByAlias, alias);
+      if (id && !hunkIds.includes(id)) hunkIds.push(id);
+    }
+    const said = COVERAGE.includes(a.coverage) ? a.coverage : "seen";
+    const coverage = !hunkIds.length ? "absent" : said === "absent" ? "partly" : said;
+    asks.push({ id: `a${asks.length + 1}`, text: body, coverage, hunkIds });
+  }
+  return asks;
+}
+
+/**
+ * A walkthrough's requests over the diff as it is now (an `overlay` view):
+ * each with the steps that carry it out, how many of its hunks only show
+ * under Not covered, and whether its code has changed since; then the steps
+ * no request points at. Null when the walkthrough was written without a task.
+ */
+export function overlayAsks(asks, view) {
+  if (!Array.isArray(asks)) return null;
+  const stepOf = new Map();
+  for (const s of view.steps) for (const f of s.found) stepOf.set(f.hunk.id, s);
+  const current = new Set(stepOf.keys());
+  for (const u of view.uncovered) for (const h of u.hunks) current.add(h.id);
+  const tied = new Set();
+  const list = asks.map((a) => {
+    const steps = [];
+    let tail = 0, missing = 0;
+    for (const id of a.hunkIds) {
+      const s = stepOf.get(id);
+      if (s) { tied.add(s.id); if (!steps.includes(s)) steps.push(s); } else if (current.has(id)) tail++; else missing++;
+    }
+    steps.sort((x, y) => x.position - y.position);
+    return { ...a, steps, tail, missing, outdated: missing > 0 };
+  });
+  // With no requests to tie steps to, no step is outside them.
+  const outside = asks.length ? view.steps.filter((s) => !tied.has(s.id)) : [];
+  const met = list.filter((a) => a.coverage !== "absent").length;
+  return { asks: list, outside, met, total: list.length };
+}
+
+/** The requests a step carries out, in the task's order. */
+export const asksOf = (task, step) => (task ? task.asks.filter((a) => a.steps.includes(step)) : []);
 
 /** The JSON object in a model's text answer, also when wrapped in a fence or prose. */
 export function parseJson(answer) {

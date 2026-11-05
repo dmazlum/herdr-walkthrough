@@ -6,6 +6,8 @@
 // a step written about the staged version is never quietly matched to an
 // unstaged one.
 
+import { firstLine } from "./turns.js";
+
 // Reads write nothing under .git: no index refresh, no lock, no fsmonitor.
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.quotePath=false", "-c", "diff.autoRefreshIndex=false"];
 // The user's diff settings (no prefixes, external tools, color) must not change what is parsed.
@@ -22,6 +24,7 @@ export const SCOPES = [
   { key: "branch", label: "Branch", about: "Everything this branch adds to its base, committed or not" },
   { key: "commit", label: "Commit", about: "One commit, against its first parent" },
   { key: "pr", label: "Pull request", about: "An open pull request on GitHub, as GitHub shows its changes (needs gh)" },
+  { key: "turn", label: "Last turn", about: "What an agent changed while answering one prompt (needs the turn hooks)" },
 ];
 
 export async function git(exec, cwd, args) {
@@ -62,6 +65,7 @@ export function sourceKey(source) {
   if (source.kind === "commit") return `commit:${source.hash}`;
   // Not pinned to the head commit: when the pull request moves on, its last walkthrough is shown as outdated.
   if (source.kind === "pr") return `pr:${source.number}`;
+  if (source.kind === "turn") return `turn:${source.id}`;
   return source.kind;
 }
 
@@ -73,6 +77,7 @@ export function describe(source, repo) {
     case "unstaged": return "Unstaged changes in the working tree, with new files.";
     case "branch": return `Everything branch "${source.head ?? repo?.branch ?? "HEAD"}" adds to "${source.base}", committed or not. Work that came in from ${source.base} is left out.`;
     case "commit": return `Commit ${source.hash.slice(0, 12)}${source.subject ? ` ("${source.subject}")` : ""}, against its first parent.`;
+    case "turn": return `One turn of a coding agent: what changed in the working tree while it answered the prompt "${firstLine(source.prompt, 160)}"${source.endTree ? "" : " (still running: read up to now)"}.`;
     case "pr": return `Pull request #${source.number}${source.title ? ` ("${source.title}")` : ""}${source.head && source.base ? `, "${source.head}" into "${source.base}"` : ""}, as GitHub shows its changes.`;
     default: return "Local changes.";
   }
@@ -96,16 +101,8 @@ export async function untracked(exec, top) {
   const take = paths.slice(0, MAX_UNTRACKED);
   if (!take.length) return { patches: [], unread };
 
-  // One call for every size and time: a stray 40 MB log must not reach the model or overflow exec.
-  // Exactly one line per file, in order ("-1" when it can't be read), so no size lands on the wrong path.
-  // GNU stat first: BSD's `stat -c` fails, while GNU's `stat -f` would succeed with something else.
-  const stats = await exec("sh", ["-c", "for f; do s=$(stat -c '%s %.9Y' \"$f\" 2>/dev/null || stat -f '%z %Fm' \"$f\" 2>/dev/null) || s=-1; echo \"${s:--1}\"; done", "sh", ...take], { cwd: top });
-  const lines = (stats.stdout ?? "").split("\n");
   const results = new Array(take.length).fill(null);
-  const queue = take.map((path, i) => {
-    const stamp = (lines[i] ?? "-1").trim();
-    return { path, i, stamp, size: Number(stamp.split(" ")[0]) };
-  });
+  const queue = await stamps(exec, top, take);
   const problems = new Array(take.length).fill(null);
   const worker = async () => {
     for (let item = queue.shift(); item; item = queue.shift()) {
@@ -128,6 +125,80 @@ export async function untracked(exec, top) {
   const patches = results.filter((p) => typeof p === "string" && p.trim());
   take.forEach((path, i) => { if (problems[i]) unread.push({ path, why: problems[i] }); });
   return { patches, unread };
+}
+
+/**
+ * Each file's size and modification time, in one call: a stray 40 MB log must
+ * not reach the model or overflow exec. Exactly one line per file, in order
+ * ("-1" when it can't be read), so no size lands on the wrong path. GNU stat
+ * first: BSD's `stat -c` fails, while GNU's `stat -f` would succeed with something else.
+ * @returns {Promise<{ path: string, i: number, stamp: string, size: number }[]>}
+ */
+async function stamps(exec, top, paths) {
+  const stats = await exec("sh", ["-c", "for f; do s=$(stat -c '%s %.9Y' \"$f\" 2>/dev/null || stat -f '%z %Fm' \"$f\" 2>/dev/null) || s=-1; echo \"${s:--1}\"; done", "sh", ...paths], { cwd: top });
+  const lines = (stats.stdout ?? "").split("\n");
+  return paths.map((path, i) => {
+    const stamp = (lines[i] ?? "-1").trim();
+    return { path, i, stamp, size: Number(stamp.split(" ")[0]) };
+  });
+}
+
+/**
+ * The tree the working tree is now, as `git add -A && git write-tree` would
+ * make it, against an index (a copy of the repository's) and an object folder
+ * of its own: the same snapshot as hooks/turn.sh, for a turn still running.
+ * The repository's objects are kept out of sight (git would update the time of
+ * any it found again), so the tree may name blobs only the repository has:
+ * a turn is always read with both. New files over 1 MB are left out, as a diff
+ * leaves them unread, and named in `big`.
+ * @returns {Promise<{ tree: string, big: string[] }>}
+ */
+export async function snapshotTree(exec, top, { index, objects }) {
+  const real = (await must(exec, top, ["rev-parse", "--path-format=absolute", "--git-path", "index"])).trim();
+  const big = await largeUntracked(exec, top);
+  const env = [`GIT_INDEX_FILE=${index}`, `GIT_OBJECT_DIRECTORY=${objects}`];
+  const run = async (args) => {
+    const r = await exec("env", [...env, "git", "-c", "core.fsmonitor=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false", ...args], { cwd: top });
+    if (r.code !== 0) throw new Error((r.stderr || `git ${args[0]} failed`).trim());
+    return (r.stdout ?? "").trim();
+  };
+  const snap = async (copy) => {
+    // The repository's own index, copied once: its file stats spare re-reading every unchanged file.
+    if (copy) await exec("sh", ["-c", '[ -f "$1" ] || [ ! -f "$0" ] || cp -p "$0" "$1"', real, index]);
+    // A file small when the turn began is in this index already: out with it too, or its old content stays.
+    if (big.length) await run(["update-index", "--force-remove", "--", ...big]);
+    await run(["add", "-A", "--", ".", ...big.map((p) => `:(exclude,literal)${p}`)]);
+    return run(["write-tree", "--missing-ok"]);
+  };
+  await exec("mkdir", ["-p", objects]);
+  let tree;
+  try { tree = await snap(true); } catch {
+    // A copied index git can't use here (a split index, say) is dropped, and the snapshot starts over without it, as turn.sh's does.
+    await exec("rm", ["-f", index]);
+    tree = await snap(false).catch(async (e) => { await exec("rm", ["-f", index]); throw e; });
+  }
+  return { tree, big };
+}
+
+/**
+ * New files over 1 MB, found by `find -size` in batches (xargs): no argument
+ * list grows with the number of new files, and no process runs per file.
+ */
+async function largeUntracked(exec, top) {
+  const script = `git ${READ.join(" ")} ls-files --others --exclude-standard -z | xargs -0 sh -c '[ $# -gt 0 ] && find "$@" -prune -type f -size +${MAX_UNTRACKED_BYTES}c' sh; exit 0`;
+  const r = await exec("sh", ["-c", script], { cwd: top });
+  return (r.stdout ?? "").split("\n").filter(Boolean);
+}
+
+/**
+ * The name of a repository's turns folder, as hooks/turn.sh makes it: the
+ * first 16 digits of git's hash of its path, hashed inside the repository so
+ * a SHA-256 one names it the same way the hook does.
+ */
+export async function turnsKey(exec, top) {
+  const r = await exec("sh", ["-c", 'printf %s "$0" | git hash-object --stdin', top], { cwd: top });
+  const key = (r.stdout ?? "").trim().slice(0, 16);
+  return r.code === 0 && /^[0-9a-f]{16}$/.test(key) ? key : null;
 }
 
 /**
@@ -197,10 +268,38 @@ export async function loadSections(exec, top, source) {
     case "pr":
       add("pr", await gh(exec, top, ["pr", "diff", String(source.number), "--color=never"]));
       break;
+    case "turn": {
+      // The snapshots' objects live in the turns' own folders; git reads them as alternates beside the repository's.
+      let end = source.endTree, big = source.endBig ?? [];
+      if (!end) ({ tree: end, big } = await snapshotTree(exec, top, { index: `${source.dir}/now.index`, objects: `${source.dir}/objects` }));
+      const objects = [...new Set([source.dir, source.endDir ?? source.dir])].map((d) => `${d}/objects`).join(":");
+      // A new file over 1 MB at the end is listed unread, as in every scope; one that was big at the start too is no news.
+      const left = big.map((p) => `:(exclude,literal)${p}`);
+      const r = await exec("env", [`GIT_ALTERNATE_OBJECT_DIRECTORIES=${objects}`, "git", ...READ, "diff", ...DIFF, source.startTree, end, ...(left.length ? ["--", ".", ...left] : [])], { cwd: top });
+      const before = new Set(source.startBig ?? []);
+      unread = big.filter((p) => !before.has(p)).map((path) => ({ path, why: "Not read: larger than 1 MB." }));
+      if (r.code !== 0) throw new Error(await snapshotsGone(exec, top, source, r.stderr) ?? (r.stderr || "git diff failed").trim());
+      add("turn", r.stdout ?? "");
+      break;
+    }
     default:
       throw new Error(`Unknown source "${source.kind}"`);
   }
   return { sections, unread };
+}
+
+/**
+ * Why a turn's diff found something missing, or null when nothing was. A
+ * turn's folder goes when 20 newer ones are kept; the files its snapshots left
+ * to the repository's objects can go with `git gc`, once nothing there names them.
+ */
+async function snapshotsGone(exec, top, source, stderr) {
+  if (!/bad object|not a tree|could not read|unable to read/i.test(stderr ?? "")) return null;
+  const dirs = [...new Set([source.dir, source.endDir ?? source.dir])];
+  const r = await exec("sh", ["-c", 'for d; do [ -d "$d/objects" ] || exit 1; done', "sh", ...dirs], { cwd: top });
+  return r.code !== 0
+    ? "This turn's snapshots are gone: only the newest 20 turns are kept."
+    : "Part of this turn is gone from the repository: its snapshots point at file contents git keeps there, and git gc has removed some that no commit or index still names.";
 }
 
 /**
@@ -253,13 +352,41 @@ export function ghError(text) {
   return t.split("\n").filter(Boolean).pop() || "gh failed.";
 }
 
-/** The repository's open pull requests, newest update first: { number, title, head, base, author, draft, when, current }. */
+/**
+ * The repository's open pull requests, newest update first: { number, title,
+ * body, head, base, author, draft, updated, current }. The description comes
+ * with the list, so matching a pull request against it costs no other call.
+ */
 export async function pullRequests(exec, top, branch = null) {
-  const out = await gh(exec, top, ["pr", "list", "--state", "open", "--limit", "50", "--json", "number,title,headRefName,baseRefName,author,isDraft,updatedAt"]);
+  const out = await gh(exec, top, ["pr", "list", "--state", "open", "--limit", "50", "--json", "number,title,body,headRefName,baseRefName,author,isDraft,updatedAt"]);
   let list;
   try { list = JSON.parse(out || "[]"); } catch { throw new Error("gh answered with something other than a list of pull requests."); }
   return list
-    .map((p) => ({ number: p.number, title: p.title ?? "", head: p.headRefName ?? "", base: p.baseRefName ?? "", author: p.author?.login ?? "",
+    .map((p) => ({ number: p.number, title: p.title ?? "", body: typeof p.body === "string" ? p.body : "", head: p.headRefName ?? "", base: p.baseRefName ?? "", author: p.author?.login ?? "",
       draft: Boolean(p.isDraft), updated: p.updatedAt ?? "", current: Boolean(branch) && p.headRefName === branch }))
     .sort((a, b) => b.updated.localeCompare(a.updated));
+}
+
+/** A commit's whole message, subject and body; null when git couldn't read it (so it can be asked again). */
+export async function commitMessage(exec, top, hash) {
+  const r = await git(exec, top, ["log", "-1", "--format=%B", hash, "--"]);
+  return r.ok ? r.out.trim() : null;
+}
+
+/**
+ * Since when (ms) the prompts sent to agents count as the task of a working
+ * tree or branch source, and how to say so: the last commit for local
+ * changes, where the branch left its base for a branch. 0 in a repository
+ * with no commits.
+ * @returns {Promise<{ since: number, label: string }>}
+ */
+export async function taskSince(exec, top, source) {
+  let at = "HEAD", label = "the last commit";
+  if (source.kind === "branch") {
+    const base = await git(exec, top, ["merge-base", source.base, "HEAD"]);
+    if (base.ok && base.out.trim()) { at = base.out.trim(); label = `the branch left ${source.base}`; }
+  }
+  const r = await git(exec, top, ["log", "-1", "--format=%ct", at, "--"]);
+  const seconds = r.ok ? Number(r.out.trim()) : 0;
+  return { since: Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 0, label: seconds > 0 ? label : "the repository began" };
 }

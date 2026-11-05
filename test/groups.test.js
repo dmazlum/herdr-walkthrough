@@ -89,7 +89,7 @@ test('Mermaid group subset rejects nesting, empty groups, unclosed blocks and ac
 });
 
 test('schema and generation require evidence while old ungrouped reports remain unchanged', () => {
-  assert.equal(PROMPT_VERSION, 7);
+  assert.equal(PROMPT_VERSION, 8);
   assert.ok(SCHEMA.properties.recap.properties.architecture.required.includes('groups'));
   const prompt = buildPrompt({ digest: 'diff', fileCount: 2, hunkCount: 3, what: 'Modules', language: 'pl' });
   assert.match(prompt.system, /Do not infer a boundary merely from folder names/);

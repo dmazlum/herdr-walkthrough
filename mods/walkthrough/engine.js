@@ -4,21 +4,28 @@
 //   entries/<key>.json     a finished walkthrough, named by everything that decides it
 //   pointers/<place>.json  the one shown last for a repository and source
 //   jobs/<place>/          a generation in progress (run.sh, prompt, answer)
+//   turns/<repo>/<turn>/   an agent's turn, written by hooks/turn.sh (see lib/turns.js)
+//   read/<repo>.json       the hunks read in a repository, by content
 //   preferences.md         optional: the reader's own wishes, added to every prompt
 
-import { exec, home, readTextFile, writeTextFile } from "herdr";
-import { loadSections, sourceKey, describe, git, worthReading, ghError } from "./lib/sources.js";
+import { exec, home, appHome, readTextFile, writeTextFile } from "herdr";
+import { loadSections, sourceKey, describe, git, worthReading, ghError, turnsKey, snapshotTree } from "./lib/sources.js";
 import { buildDigest } from "./lib/digest.js";
 import { buildPrompt } from "./lib/prompt.js";
-import { SCHEMA, normalize, VERSION } from "./lib/walkthrough.js";
+import { schemaFor, normalize, VERSION } from "./lib/walkthrough.js";
 import { cacheKey, codeKey, placeKey, deadline, MAX_PROMPT_CHARS } from "./lib/cache.js";
+import { longHash } from "./lib/hash.js";
+import { mergeRead } from "./lib/read.js";
 import { jobScript, readOutcome, isRunCommand } from "./lib/job.js";
+import { parseListing, resolveEnds, LISTING } from "./lib/turns.js";
+import { taskKey, taskCacheKey, parseTranscript, projectSlug, jsonPath, TRANSCRIPTS } from "./lib/task.js";
 
 const MAX_ENTRIES = 200;
 export const dataDir = () => `${home()}/.herdr/walkthrough`;
 const entryPath = (key) => `${dataDir()}/entries/${key}.json`;
 const pointerPath = (place) => `${dataDir()}/pointers/${place}.json`;
 const jobDir = (place) => `${dataDir()}/jobs/${place}`;
+const readPath = (top) => `${dataDir()}/read/${longHash(top)}.json`;
 
 async function readJson(path) {
   try {
@@ -35,10 +42,9 @@ async function write(path, text) {
 
 export async function ensureDirs() {
   const d = dataDir();
-  await exec("mkdir", ["-p", `${d}/entries`, `${d}/pointers`, `${d}/jobs`]);
+  await exec("mkdir", ["-p", `${d}/entries`, `${d}/pointers`, `${d}/jobs`, `${d}/read`]);
 }
 
-/** Whether Claude Code's `claude` can be started: its version, or null. */
 /**
  * Puts text on the system clipboard. `exec` takes no input, so the text goes
  * through a file: pbcopy on macOS, else wl-copy or xclip.
@@ -50,7 +56,9 @@ export async function copyText(text) {
   if (r.code !== 0) throw new Error((r.stderr || "No clipboard program found (pbcopy, wl-copy or xclip).").trim());
 }
 
-const COPY = 'if command -v pbcopy >/dev/null; then pbcopy < "$1"; elif command -v wl-copy >/dev/null; then wl-copy < "$1"; elif command -v xclip >/dev/null; then xclip -selection clipboard < "$1"; else echo "No clipboard program found (pbcopy, wl-copy or xclip)." >&2; exit 1; fi';
+// The text is UTF-8, said so to each program: started from an app, pbcopy sees no UTF-8 locale
+// and reads the bytes as Mac Roman, so "ş" or "日" land on the clipboard garbled.
+const COPY = 'if command -v pbcopy >/dev/null; then LC_ALL=en_US.UTF-8 pbcopy < "$1"; elif command -v wl-copy >/dev/null; then wl-copy --type "text/plain;charset=utf-8" < "$1"; elif command -v xclip >/dev/null; then xclip -selection clipboard -target UTF8_STRING < "$1"; else echo "No clipboard program found (pbcopy, wl-copy or xclip)." >&2; exit 1; fi';
 
 // GitHub refuses a comment longer than this.
 export const MAX_COMMENT_CHARS = 65536;
@@ -69,6 +77,7 @@ export async function postComment(top, number, text) {
   return (r.stdout ?? "").trim().split("\n").pop() ?? "";
 }
 
+/** Whether Claude Code's `claude` can be started: its version, or null. */
 export async function claudeVersion() {
   try {
     const r = await exec("claude", ["--version"]);
@@ -87,9 +96,22 @@ export async function readDiff(repo, source) {
   return { ...digest, unread, sk: sourceKey(source), what: describe(source, repo) };
 }
 
-/** The key the walkthrough of this diff would have, in this model and language, under these preferences. */
-export const keyFor = (repo, diff, model, language, preferences = "") =>
-  cacheKey({ top: repo.top, source: diff.sk, model, language, preferences, files: diff.files });
+/** The key the walkthrough of this diff would have, in this model and language, under these preferences, matched against this task. */
+export const keyFor = (repo, diff, model, language, preferences = "", task = null) =>
+  cacheKey({ top: repo.top, source: diff.sk, model, language, preferences, files: diff.files, task: taskCacheKey(task) });
+
+/**
+ * What people typed into Claude Code sessions working in a repository since
+ * `since` (ms), oldest first: the task of a change made without the hooks
+ * that record turns. Read from Claude Code's transcripts (its folder names
+ * the project by its path; a session started in a subfolder counts too).
+ */
+export async function transcriptMessages(top, since) {
+  // Claude Code shortens very long folder names; the prefix finds them, and each line's cwd decides.
+  const prefix = projectSlug(top).slice(0, 120);
+  const r = await exec("sh", ["-c", TRANSCRIPTS, prefix, String(Math.floor(since / 1000)), jsonPath(top)]).catch(() => null);
+  return parseTranscript(r?.stdout ?? "", { top, since });
+}
 
 /** The reader's own wishes for every walkthrough, or "". */
 export const readPreferences = async () => (await readTextFile(`${dataDir()}/preferences.md`).catch(() => null)) ?? "";
@@ -144,9 +166,64 @@ async function touch(path) {
   await exec("touch", [path]).catch(() => undefined);
 }
 
+/** Whether a walkthrough with exactly this key is stored. */
+export const hasEntry = async (key) => (await readJson(entryPath(key)))?.version === VERSION;
+
+/** Where the installed hook script is, for the settings snippet: the mod's own folder. */
+// Under the home folder it is written from $HOME, as the README gives it: shorter, and the hook's shell expands it.
+export const hookScript = () => {
+  const path = `${appHome()}/mods/walkthrough/hooks/turn.sh`;
+  return path.startsWith(`${home()}/`) ? `$HOME${path.slice(home().length)}` : path;
+};
+
+/** A repository's turns folder, named as hooks/turn.sh names it. Made here so it can be watched before the first turn. */
+export async function turnsFolder(top) {
+  const key = await turnsKey(exec, top);
+  if (!key) return null;
+  const dir = `${dataDir()}/turns/${key}`;
+  await exec("mkdir", ["-p", dir]).catch(() => undefined);
+  return dir;
+}
+
+/** A repository's turns, newest first, each with where it ended (lib/turns.js; `ends`: resolveEnds' options). */
+export async function listTurns(folder, ends = {}) {
+  if (!folder) return [];
+  const r = await exec("sh", ["-c", LISTING, folder]).catch(() => null);
+  return resolveEnds(parseListing(r?.stdout ?? "", folder), ends);
+}
+
+/**
+ * Ends a turn no Stop hook ended and whose agent has gone quiet (it was quit,
+ * or stopped and left): its end is the working tree now, marked interrupted,
+ * so it stops following later edits. A Stop hook arriving after all ends it again.
+ */
+export async function closeTurn(top, turn) {
+  const { tree, big } = await snapshotTree(exec, top, { index: `${turn.dir}/now.index`, objects: `${turn.dir}/objects` });
+  await write(`${turn.dir}/end.big`, big.map((p) => `${p}\n`).join(""));
+  await write(`${turn.dir}/end.meta`, `tree=${tree}\nended=${Math.floor(Date.now() / 1000)}\ninterrupted=1\n`);
+}
+
+/** The hunks read in a repository: { "<path>:<digest>": ms }, empty when none are. */
+export async function loadRead(top) {
+  const read = await readJson(readPath(top));
+  return read && typeof read === "object" && !Array.isArray(read) ? read : {};
+}
+
+/**
+ * Writes this window's marks (the `keys` it changed, as `read` has them) over
+ * what is on disk now, so two windows on one repository keep each other's.
+ * @returns {Promise<Record<string, number>>} the record as written
+ */
+export async function saveRead(top, read, keys) {
+  await ensureDirs();
+  const merged = mergeRead(await readJson(readPath(top)), read, keys);
+  await write(readPath(top), JSON.stringify(merged));
+  return merged;
+}
+
 /** The prompt that would be sent, to size it before anything is spent. */
-export function preparePrompt(diff, { language, previous, preferences = "" }) {
-  return buildPrompt({ digest: diff.text + (diff.generatedPaths.length ? "\n\nGenerated files changed (contents not read; include their limited visibility in recap):\n" + diff.generatedPaths.map((p) => JSON.stringify(p)).join("\n") : ""), fileCount: diff.fileCount, hunkCount: diff.hunkCount, what: diff.what, language, previous, preferences });
+export function preparePrompt(diff, { language, previous, preferences = "", task = null }) {
+  return buildPrompt({ digest: diff.text + (diff.generatedPaths.length ? "\n\nGenerated files changed (contents not read; include their limited visibility in recap):\n" + diff.generatedPaths.map((p) => JSON.stringify(p)).join("\n") : ""), fileCount: diff.fileCount, hunkCount: diff.hunkCount, what: diff.what, language, previous, preferences, task });
 }
 
 export const promptChars = (p) => p.system.length + p.prompt.length;
@@ -162,7 +239,7 @@ export async function jobOf(repo, sk) {
 }
 
 /** Starts a generation in the background and returns its job. */
-export async function startJob(repo, diff, { key, model, language, prompt, source }) {
+export async function startJob(repo, diff, { key, model, language, prompt, source, auto = false, before = [], task = null }) {
   await ensureDirs();
   const dir = jobDir(placeKey(repo.top, diff.sk));
   // A run still going there (another window started it) is stopped, not orphaned.
@@ -171,11 +248,13 @@ export async function startJob(repo, diff, { key, model, language, prompt, sourc
   await exec("mkdir", ["-p", dir]);
   const meta = {
     key, code: codeKey(diff.files), model, language, top: repo.top, source, sk: diff.sk, started: Date.now(), deadline: Date.now() + deadline(diff.hunkCount),
-    idByAlias: diff.idByAlias, digestFiles: [...diff.digestFiles, ...diff.generatedPaths.map((path) => ({ path, aliases: [] }))], hunkCount: diff.hunkCount,
+    idByAlias: diff.idByAlias, digestFiles: [...diff.digestFiles, ...diff.generatedPaths.map((path) => ({ path, aliases: [] }))], hunkCount: diff.hunkCount, auto, before,
+    // Kept with the walkthrough: where its task came from, and the key that tells when the task has changed since.
+    task: task ? { from: task.from, label: task.label, short: task.short, text: task.text, context: task.context ?? "", key: taskKey(task) } : null,
   };
   await writeTextFile(`${dir}/system.txt`, prompt.system, null);
   await writeTextFile(`${dir}/prompt.txt`, prompt.prompt, null);
-  await writeTextFile(`${dir}/schema.json`, JSON.stringify(SCHEMA), null);
+  await writeTextFile(`${dir}/schema.json`, JSON.stringify(schemaFor(Boolean(task))), null);
   await writeTextFile(`${dir}/run.sh`, jobScript(), null);
   await writeTextFile(`${dir}/meta.json`, JSON.stringify(meta), null);
   // Detached: exec returns at once, and the run outlives this window.
@@ -240,11 +319,12 @@ export async function finishJob(job) {
   const read = (name) => readTextFile(`${claimed}/${name}`).catch(() => null);
   try {
     const { raw, cost } = readOutcome({ out: await read("out.json"), err: await read("err.txt"), code: job.code });
-    const walkthrough = normalize(raw, job.meta.idByAlias, job.meta.digestFiles);
+    const walkthrough = normalize(raw, job.meta.idByAlias, job.meta.digestFiles, { asks: Boolean(job.meta.task) });
     if (!Array.isArray(raw.contracts)) throw new Error("The generated report omitted the Schema/API assessment. Regenerate it.");
     if (!walkthrough.recap) throw new Error("The generated report has no recap. Regenerate to include changes, motivations and architecture.");
     const { key, model, language, top, source, sk } = job.meta;
-    const entry = { version: VERSION, key, code: job.meta.code, model, language, top, source, sk, generatedAt: Date.now(), took: Date.now() - job.meta.started, cost, walkthrough };
+    // `before`: the hunks of the walkthrough shown when this one was asked for, to tell what changed since it was read.
+    const entry = { version: VERSION, key, code: job.meta.code, model, language, top, source, sk, generatedAt: Date.now(), took: Date.now() - job.meta.started, cost, walkthrough, before: job.meta.before ?? [], task: job.meta.task ?? null };
     await ensureDirs();
     await write(entryPath(key), JSON.stringify(entry));
     await write(pointerPath(placeKey(top, sk)), JSON.stringify({ key, top, source: sk }));

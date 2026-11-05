@@ -73,7 +73,7 @@ test('digest retains added/modified status for conservative classification', () 
 });
 
 test('new generations require components; legacy diagrams stay unclassified and readable', () => {
-  assert.equal(PROMPT_VERSION, 7);
+  assert.equal(PROMPT_VERSION, 8);
   assert.ok(SCHEMA.properties.recap.properties.architecture.required.includes('components'));
   assert.equal(normalizeComponents(undefined, mermaid, aliases, files), undefined);
   const p = buildPrompt({ digest: 'diff', fileCount: 2, hunkCount: 2, what: 'Changes' });

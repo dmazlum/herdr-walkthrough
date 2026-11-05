@@ -1,0 +1,209 @@
+<!doctype html>
+<!-- The README's preview.png, drawn by hand to match the dialog: sh docs/preview/render.sh renders it. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Walkthrough preview</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #12121c; --panel: #1b1b26; --raised: #23232f; --border: #2e2e3c; --hover: #2a2a37;
+    --fg: #e8e8f0; --muted: #a3a3b5; --dim: #6f6f82;
+    --accent: #7c9cff; --green: #6fd08c; --yellow: #e6b450; --red: #f07178; --purple: #b59cff;
+    --kw: #c792ea; --str: #c3e88d; --fn: #82aaff; --num: #f78c6c;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 2560px; height: 1280px; overflow: hidden; background: var(--bg); }
+  body { font-family: Inter, system-ui, sans-serif; color: var(--fg); -webkit-font-smoothing: antialiased; }
+  .stage { zoom: 1.28; width: 2000px; height: 1000px; position: relative; overflow: hidden;
+    background:
+      radial-gradient(900px 600px at 78% 10%, #2b2350 0%, transparent 60%),
+      radial-gradient(700px 500px at 10% 100%, #1d2b4a 0%, transparent 60%),
+      linear-gradient(#ffffff06 1px, transparent 1px) 0 0 / 40px 40px,
+      linear-gradient(90deg, #ffffff06 1px, transparent 1px) 0 0 / 40px 40px,
+      var(--bg); }
+  .mono { font-family: "JetBrains Mono", ui-monospace, monospace; }
+
+  /* left: the pitch */
+  .pitch { position: absolute; left: 100px; top: 112px; width: 720px; }
+  .badge { display: inline-flex; align-items: center; gap: 12px; padding: 6px 18px 6px 6px; border: 1px solid var(--border); border-radius: 999px; font-size: 19px; color: var(--muted); background: #ffffff05; }
+  .badge b { padding: 6px 14px; border-radius: 999px; background: #7c9cff22; color: var(--accent); font-weight: 600; }
+  .brand { display: flex; align-items: center; gap: 22px; margin-top: 42px; }
+  .logo { width: 80px; height: 80px; border-radius: 20px; background: linear-gradient(135deg, #7c9cff, #b59cff 60%, #f0a6ca); display: grid; place-items: center; box-shadow: 0 10px 40px #7c9cff40; }
+  .logo span { display: block; width: 28px; height: 4px; border-radius: 2px; background: #fff; margin: 4px 0; }
+  .brand h2 { font-size: 34px; font-weight: 700; letter-spacing: -0.5px; }
+  h1 { margin-top: 40px; font-size: 56px; line-height: 1.07; font-weight: 800; letter-spacing: -2px; }
+  h1 em { font-style: normal; background: linear-gradient(90deg, #7c9cff, #b59cff 55%, #f0b8a0); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .lede { margin-top: 26px; font-size: 23px; line-height: 1.6; color: var(--muted); }
+  .points { margin-top: 40px; display: flex; flex-direction: column; gap: 20px; }
+  .point { display: flex; align-items: center; gap: 18px; font-size: 23px; }
+  .point i { flex: none; width: 40px; height: 40px; border: 1px solid var(--border); border-radius: 10px; display: grid; place-items: center; font-style: normal; font-size: 18px; color: var(--muted); background: #ffffff05; }
+  .point b { font-weight: 500; }
+  .point span { color: var(--dim); font-size: 21px; }
+
+  /* right: the app */
+  .terminal { position: absolute; left: 876px; top: 58px; width: 1060px; height: 520px; border: 1px solid var(--border); border-radius: 18px; background: #15151f; box-shadow: 0 30px 80px #0008; }
+  .titlebar { height: 62px; display: flex; align-items: center; gap: 12px; padding: 0 24px; border-bottom: 1px solid var(--border); }
+  .dot { width: 16px; height: 16px; border-radius: 50%; }
+  .tabs { display: flex; gap: 10px; margin-left: 28px; font-size: 19px; color: var(--muted); }
+  .tabs span { padding: 7px 16px; border-radius: 9px; }
+  .tabs .on { background: var(--raised); color: var(--fg); }
+  .tabs .on::before { content: "●"; color: var(--green); font-size: 10px; margin-right: 7px; vertical-align: middle; }
+  .term { padding: 22px 28px; font-size: 18px; line-height: 1.8; color: var(--fg); }
+  .term .o { color: #f0a070; } .term .g { color: var(--green); } .term .d { color: var(--dim); } .term .c { color: var(--fn); }
+  .hint { position: absolute; right: 26px; top: 118px; display: flex; align-items: center; gap: 12px; padding: 8px 20px 8px 8px; border: 1px solid var(--border); border-radius: 999px; background: #1d1d28ee; font-size: 20px; }
+  .hint kbd { font-family: inherit; font-size: 16px; padding: 6px 12px; border-radius: 999px; background: var(--raised); color: var(--muted); }
+
+  .dialog { position: absolute; left: 938px; top: 236px; width: 998px; height: 710px; border: 1px solid var(--border); border-radius: 16px; background: var(--panel); box-shadow: 0 40px 100px #000a; overflow: hidden; display: flex; flex-direction: column; }
+  .head { height: 58px; flex: none; display: flex; align-items: center; gap: 12px; padding: 0 22px; border-bottom: 1px solid var(--border); font-size: 19px; }
+  .head .diamond { color: var(--accent); font-size: 14px; }
+  .head b { font-weight: 600; }
+  .head .sub { color: var(--muted); }
+  .head .esc { margin-left: auto; color: var(--dim); font-size: 17px; }
+  .bar { height: 60px; flex: none; display: flex; align-items: center; gap: 10px; padding: 0 18px; border-bottom: 1px solid var(--border); font-size: 16.5px; }
+  .seg { display: flex; padding: 3px; border-radius: 10px; background: #ffffff06; color: var(--muted); }
+  .seg span { padding: 7px 12px; border-radius: 8px; }
+  .seg .on { background: var(--raised); color: var(--fg); font-weight: 600; }
+  .dd { padding: 7px 12px; border: 1px solid var(--border); border-radius: 9px; white-space: nowrap; }
+  .dd::after { content: " ▾"; color: var(--dim); font-size: 13px; }
+  .dd.task { color: var(--accent); border-color: #7c9cff55; background: #7c9cff14; }
+  .grow { flex: 1; }
+  .body { flex: 1; display: flex; min-height: 0; }
+  .toc { width: 330px; flex: none; border-right: 1px solid var(--border); padding: 18px 14px; display: flex; flex-direction: column; gap: 3px; }
+  .toc h3 { padding: 0 8px; font-size: 19px; font-weight: 600; }
+  .toc p { padding: 6px 8px 4px; font-size: 16px; line-height: 1.55; color: var(--muted); }
+  .row { display: flex; align-items: center; gap: 12px; padding: 8px 10px; border-radius: 9px; font-size: 17px; border-left: 2px solid transparent; }
+  .row i { flex: none; width: 26px; height: 26px; border-radius: 7px; display: grid; place-items: center; font-style: normal; font-size: 13px; font-weight: 600; background: var(--raised); color: var(--muted); }
+  .row .n { margin-left: auto; font-size: 15px; color: var(--yellow); }
+  .row.task i { color: var(--accent); }
+  .row.on { background: #7c9cff1f; border-left-color: var(--accent); }
+  .row .key { margin-left: auto; width: 8px; height: 8px; border-radius: 4px; background: var(--accent); }
+  .ok { color: var(--green) !important; }
+  .part { padding: 16px 8px 4px; font-size: 13px; font-weight: 600; letter-spacing: 0.6px; color: var(--dim); }
+  .sep { height: 1px; background: var(--border); margin: 10px 8px 4px; }
+  .muted { color: var(--muted); }
+  .foot { padding: 12px 8px 0; font-size: 14.5px; color: var(--dim); }
+
+  .page { flex: 1; min-width: 0; padding: 22px 28px; display: flex; flex-direction: column; gap: 14px; }
+  .crumb { font-size: 14px; font-weight: 600; letter-spacing: 0.8px; color: var(--dim); }
+  .title { display: flex; align-items: center; gap: 14px; font-size: 27px; font-weight: 600; letter-spacing: -0.3px; }
+  .chip { display: inline-flex; align-items: center; padding: 3px 10px; border-radius: 7px; font-size: 15px; font-weight: 500; border: 1px solid; }
+  .chip.key { color: var(--accent); border-color: #7c9cff66; background: #7c9cff14; }
+  .chip.for { color: var(--green); border-color: #6fd08c55; background: #6fd08c12; }
+  .chip.dec { color: var(--yellow); border-color: #e6b45066; background: #e6b45012; }
+  .text { font-size: 19px; line-height: 1.6; color: #d6d6e2; }
+  .text code { font-family: "JetBrains Mono", monospace; font-size: 16.5px; padding: 2px 7px; border-radius: 6px; background: var(--raised); color: var(--fg); }
+  .note { display: flex; align-items: center; gap: 12px; font-size: 17px; color: var(--muted); }
+  .code { border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: #16161f; }
+  .code .file { display: flex; justify-content: space-between; padding: 10px 16px; font-size: 16px; font-weight: 600; border-bottom: 1px solid var(--border); }
+  .code .file span { color: var(--dim); font-weight: 400; }
+  .ln { display: flex; font-family: "JetBrains Mono", monospace; font-size: 16.5px; line-height: 30px; white-space: pre; }
+  .ln .no { flex: none; width: 48px; text-align: right; padding-right: 12px; color: var(--dim); }
+  .ln .sg { flex: none; width: 22px; color: var(--dim); }
+  .ln .src { white-space: pre; }
+  .ln.add { background: #6fd08c14; } .ln.add .sg { color: var(--green); }
+  .ln.del { background: #f0717814; } .ln.del .sg { color: var(--red); }
+  .k { color: var(--kw); } .f { color: var(--fn); } .s { color: var(--str); } .u { color: var(--num); }
+
+  .bottom { height: 62px; flex: none; display: flex; align-items: center; gap: 12px; padding: 0 18px; border-top: 1px solid var(--border); font-size: 17px; }
+  .btn { padding: 8px 16px; border: 1px solid var(--border); border-radius: 9px; }
+  .ghost { color: var(--muted); padding: 8px 12px; }
+
+  /* the floating task card */
+  .card { position: absolute; left: 772px; top: 618px; width: 410px; border: 1px solid #7c9cff44; border-radius: 16px; background: #1e1e2bf2; box-shadow: 0 30px 80px #000c, 0 0 0 6px #7c9cff10; padding: 20px 22px; backdrop-filter: blur(8px); }
+  .card .cap { font-size: 13px; font-weight: 600; letter-spacing: 0.8px; color: var(--dim); }
+  .card h4 { margin: 6px 0 10px; font-size: 20px; font-weight: 600; }
+  .ask { display: flex; gap: 12px; padding: 9px 0; border-top: 1px solid var(--border); font-size: 16.5px; line-height: 1.45; }
+  .ask > b { flex: none; width: 18px; font-weight: 500; }
+  .ask small { display: block; margin-top: 5px; font-size: 13.5px; }
+  .pill { display: inline-block; padding: 2px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--raised); color: var(--fg); margin-right: 4px; }
+</style>
+</head>
+<body>
+<div class="stage">
+
+  <div class="pitch">
+    <div class="badge"><b>Herdr mod</b> Claude Code · GitHub</div>
+    <div class="brand"><div class="logo"><div><span></span><span style="width:20px"></span><span></span></div></div><h2>Walkthrough</h2></div>
+    <h1>Read the change<br><em>in the order it makes sense.</em></h1>
+    <p class="lede">Claude groups a diff into steps, puts them in reading order and explains each one, with its code beside it, matched against what was asked.</p>
+    <div class="points">
+      <div class="point"><i>1</i><b>Steps in reading order</b><span>types first, tests beside code</span></div>
+      <div class="point"><i>◎</i><b>Matched against the task</b><span>✓ ◐ ○ per request</span></div>
+      <div class="point"><i>↺</i><b>The agent's last turn</b><span>one prompt, nothing else</span></div>
+      <div class="point"><i>!</i><b>Honest about staleness</b><span>moved code: Outdated</span></div>
+    </div>
+  </div>
+
+  <div class="terminal">
+    <div class="titlebar">
+      <div class="dot" style="background:#ff5f57"></div><div class="dot" style="background:#febc2e"></div><div class="dot" style="background:#28c840"></div>
+      <div class="tabs"><span class="on">kv-store</span><span>web</span><span>infra</span></div>
+    </div>
+    <div class="term mono">
+      <div><span class="o">✻</span> Claude Code <span class="d">· ~/code/kv-store</span></div>
+      <div><span class="g">●</span> Update(<span class="c">src/store.js</span>)</div>
+      <div class="d">&nbsp;&nbsp;⎿ Added 9 lines, removed 4 lines</div>
+    </div>
+    <div class="hint"><kbd>⌘⇧K</kbd>open Walkthrough</div>
+  </div>
+
+  <div class="dialog">
+    <div class="head"><span class="diamond">◆</span><b>Walkthrough</b><span class="sub">kv-store</span><span class="sub">⎇ key-ttl</span><span class="esc">Esc</span></div>
+    <div class="bar">
+      <div class="seg"><span>Uncommitted</span><span>Branch</span><span>Pull request</span><span class="on">Last turn</span></div>
+      <span class="dd">Let keys expire after a TTL</span>
+      <span class="grow"></span>
+      <span class="dd task">◎ prompt</span>
+      <span class="dd">Haiku</span>
+    </div>
+    <div class="body">
+      <div class="toc">
+        <h3>Expiring key-value entries</h3>
+        <p>Keys can expire after a TTL; reads of a gone key answer 404.</p>
+        <div class="row task"><i>◎</i>Task<span class="n">2 / 3</span></div>
+        <div class="part">EXPIRY</div>
+        <div class="row"><i class="ok">✓</i>Entries carry a timestamp</div>
+        <div class="row on"><i>2</i>Reads drop expired values<span class="key"></span></div>
+        <div class="part">THE API</div>
+        <div class="row"><i>3</i><span class="muted">404 for gone keys</span></div>
+        <div class="row"><i>4</i><span class="muted">Tests drive the clock</span></div>
+        <div class="sep"></div>
+        <div class="row"><i style="background:none">…</i><span class="muted">Not covered</span><span class="muted" style="margin-left:auto;font-size:15px">1</span></div>
+        <div class="foot">Haiku · English · $0.002</div>
+      </div>
+      <div class="page">
+        <div class="crumb">EXPIRY · STEP 2 OF 4</div>
+        <div class="title">Reads drop expired values <span class="chip key">Key change</span></div>
+        <div><span class="chip for">For: Keys expire after a TTL</span></div>
+        <div class="text"><code>get</code> now checks a value's age against <code>ttlMs</code>: past it, the entry is deleted and <code>undefined</code> comes back.</div>
+        <div class="note"><span class="chip dec">Decision</span>Expired entries are removed on read, not by a timer.</div>
+        <div class="code">
+          <div class="file">src/store.js <span>modified</span></div>
+          <div class="ln del"><span class="no">4</span><span class="sg">-</span><span class="src">  <span class="f">get</span>(id) { <span class="k">return</span> <span class="k">this</span>.items.<span class="f">get</span>(id); }</span></div>
+          <div class="ln add"><span class="no">4</span><span class="sg">+</span><span class="src">  <span class="f">get</span>(id) {</span></div>
+          <div class="ln add"><span class="no">5</span><span class="sg">+</span><span class="src">    <span class="k">const</span> hit = <span class="k">this</span>.items.<span class="f">get</span>(id);</span></div>
+          <div class="ln add"><span class="no">6</span><span class="sg">+</span><span class="src">    <span class="k">if</span> (<span class="k">this</span>.<span class="f">now</span>() - hit.at &gt; <span class="k">this</span>.ttlMs) {</span></div>
+          <div class="ln add"><span class="no">7</span><span class="sg">+</span><span class="src">      <span class="k">this</span>.items.<span class="f">delete</span>(id); <span class="k">return</span> <span class="k">undefined</span>;</span></div>
+          <div class="ln add"><span class="no">8</span><span class="sg">+</span><span class="src">    }</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="bottom">
+      <span class="btn">← Previous</span><span class="btn">Next →</span><span style="color:var(--dim)">2 of 4 read</span>
+      <span class="grow"></span><span class="ghost">Post to #42</span><span class="ghost">Copy as Markdown</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="cap">TASK · LAST TURN'S PROMPT</div>
+    <h4>What the task asks for</h4>
+    <div class="ask"><b class="ok">✓</b><div>Keys expire after a TTL<small><span class="pill">1. Entries carry a timestamp</span><span class="pill">2. Reads drop…</span></small></div></div>
+    <div class="ask"><b style="color:var(--yellow)">◐</b><div>Gone keys answer 404<small class="muted">Partly · <span class="pill">3. 404 for gone keys</span></small></div></div>
+    <div class="ask"><b style="color:var(--dim)">○</b><div class="muted">Document the TTL in the README<small style="color:var(--dim)">Not in this diff</small></div></div>
+  </div>
+
+</div>
+</body>
+</html>
