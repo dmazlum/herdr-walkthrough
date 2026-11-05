@@ -128,16 +128,17 @@ test("a branch against its base: committed and uncommitted work, not the base's"
   assert.deepEqual((await paths({ kind: "branch", base: "main" })).files, ["branch:a.txt:modified", "branch:f.txt:added", "branch:g.txt:added"]);
 });
 
-test("run.sh stops a claude that hangs, and the reason is the error", async () => {
+test("run.sh stops a pi that hangs, and the reason is the error", async () => {
   const job = mkdtempSync(join(tmpdir(), "walkthrough-job-"));
   const bin = join(job, "bin");
   mkdirSync(bin);
-  writeFileSync(join(bin, "claude"), "#!/bin/sh\nsleep 60\n");
-  chmodSync(join(bin, "claude"), 0o755);
+  const pi = join(bin, "pi");
+  writeFileSync(pi, "#!/bin/sh\nsleep 60\n");
+  chmodSync(pi, 0o755);
   for (const f of ["schema.json", "system.txt", "prompt.txt"]) writeFileSync(join(job, f), "{}");
   writeFileSync(join(job, "run.sh"), jobScript());
   const started = Date.now();
-  await new Promise((resolve) => execFile("sh", [join(job, "run.sh"), "haiku", "1"], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } }, resolve));
+  await new Promise((resolve) => execFile("sh", [join(job, "run.sh"), pi, "deepseek/deepseek-flash", "1"], {}, resolve));
   assert.ok(Date.now() - started < 20_000);
   assert.ok(existsSync(join(job, "code")));
   assert.throws(() => readOutcome({ out: readFileSync(join(job, "out.json"), "utf8"), err: readFileSync(join(job, "err.txt"), "utf8"), code: readFileSync(join(job, "code"), "utf8") }), /Stopped after 1 seconds/);

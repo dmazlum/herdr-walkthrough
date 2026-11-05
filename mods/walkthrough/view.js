@@ -15,10 +15,10 @@ import { estimateTokens, codeKey, placeKey, MAX_PROMPT_CHARS } from "./lib/cache
 import { formatComments, addComment, sameSpot } from "./lib/comments.js";
 import { toMarkdown } from "./lib/export.js";
 import { readKey, hunkRead, isRead, markStep, unmarkStep, mergeRead, changedSince } from "./lib/read.js";
-import { readDiff, readPreferences, matters, keyFor, findShown, preparePrompt, fits, promptChars, jobOf, startJob, alive, finished, cancelJob, finishJob, copyText, postComment, claudeVersion, systemLocale, ensureDirs, loadRead, saveRead, transcriptMessages } from "./engine.js";
+import { readDiff, readPreferences, matters, keyFor, findShown, preparePrompt, fits, promptChars, jobOf, startJob, alive, finished, cancelJob, finishJob, copyText, postComment, piVersion, systemLocale, ensureDirs, loadRead, saveRead, transcriptMessages } from "./engine.js";
 import { button, chip, menu, picker, formatElapsed, formatTokens } from "./ui.js";
 import { turnSource, isOpen, firstLine } from "./lib/turns.js";
-import { AUTO, DEFAULT_AUTO, autoOf, startTurns, loadTurns, turnLabel, turnItems, chooseTurn, turnTick, autoGenerate, announce, hookHelp } from "./turnview.js";
+import { AUTO, DEFAULT_AUTO, autoOf, startTurns, loadTurns, turnLabel, turnItems, chooseTurn, turnTick, autoGenerate, announce, hookHelp, recordAgentTurns } from "./turnview.js";
 
 const PREFS = "walkthrough.prefs";
 // Lines drawn on one page; a step past this says how many it leaves out.
@@ -149,7 +149,7 @@ export class Walkthrough {
 
     cx.spawn(async (cx) => {
       if (!this.folder || this.remote) { this.repo = null; cx.notify(); return; }
-      const [repo, claude, locale] = await Promise.all([repoAt(exec, this.folder).catch(() => null), claudeVersion(), this.language ? null : systemLocale()]);
+      const [repo, claude, locale] = await Promise.all([repoAt(exec, this.folder).catch(() => null), piVersion(), this.language ? null : systemLocale()]);
       this.repo = repo;
       this.claude = claude;
       if (!this.language) this.language = fromLocale(locale);
@@ -165,6 +165,7 @@ export class Walkthrough {
       this.commit = commits[0] ?? null;
       if (this.scope === "pr") await this.loadPullRequests();
       await startTurns(this, cx);
+      recordAgentTurns(this, cx);
       await this.reload(cx);
       this.watch(cx);
       await autoGenerate(this, cx, this.turn); // the turn the tab shows: this terminal's newest, else the newest
@@ -376,7 +377,7 @@ export class Walkthrough {
           this.job.pid = job.pid;
           this.deadSince = null;
         } else if (!this.deadSince) {
-          // claude has just exited and run.sh is about to write its code: give it a moment.
+          // pi has just exited and run.sh is about to write its code: give it a moment.
           this.deadSince = Date.now();
         } else if (Date.now() - this.deadSince > 3000) {
           this.deadSince = null;
@@ -467,7 +468,7 @@ export class Walkthrough {
       const before = (this.shown?.entry.walkthrough.parts ?? []).flatMap((p) => p.steps.flatMap((st) => st.hunkIds));
       this.setJob(await startJob(repo, diff, { key, model, language, prompt, source, before, task }));
     } catch (err) {
-      this.genError = `Couldn't start claude: ${String(err?.message ?? err)}`;
+      this.genError = `No se pudo lanzar pi: ${String(err?.message ?? err)}`;
     }
   }
 
@@ -772,7 +773,7 @@ export class Walkthrough {
     const action = busy
       ? button(t, "cancel", "Cancel", (_e, cx) => cx.spawn(async (cx) => this.cancel(cx)), { small: true })
       : button(t, "generate", this.shown?.exact ? "Regenerate" : "Generate", (_e, cx) => cx.spawn(async (cx) => this.generate(cx)),
-        { kind: this.shown?.exact ? "outline" : "solid", small: true, disabled: !this.canGenerate(), tooltip: this.claude === null ? "claude isn't installed" : null });
+        { kind: this.shown?.exact ? "outline" : "solid", small: true, disabled: !this.canGenerate(), tooltip: this.claude === null ? "pi no esta instalado" : null });
     // Above: what to read, and the one action. Below: which one of it (left), and how it is written (right).
     const top = h_flex().min_h(42).flex_none().px(14).py(7).gap(8).items_center().flex_wrap().border_b(1).border_color(t.border)
       .child(tabs)
@@ -877,7 +878,7 @@ export class Walkthrough {
       .when(Boolean(text), (e) => e.child(div().max_w(560).text_center().text_size(12.5).line_height(1.5).text_color(t.dim).child(text)))
       .when(actions.length > 0, (e) => e.child(h_flex().mt(8).gap(8).items_center().children(actions)));
     const goTo = (key, label) => button(t, `go-${key}`, label, (_e, cx) => this.pickScope(key, cx), { kind: "ghost", small: true });
-    if (this.remote) return center("This space is on another machine", "Walkthroughs read git and run claude on this computer only.", { icon: "⇄" });
+    if (this.remote) return center("This space is on another machine", "Walkthroughs read git and run pi on this computer only.", { icon: "⇄" });
     if (this.repo === undefined) return center("Reading…");
     if (this.repo === null) return center("Not a git repository", this.folder ? `Nothing to walk through in ${this.folder}.` : "Focus a terminal in a repository, then open the walkthrough again.", { icon: "⎇" });
     if (this.error) return center("Couldn't read the diff", this.error, { icon: "!", color: t.ansi1 });
@@ -979,7 +980,7 @@ export class Walkthrough {
     return v_flex().id("intro").size_full().overflow_y_scrollbar().items_center().p(28).gap(14)
       .child(v_flex().w_full().max_w(620).gap(14)
         .child(div().text_size(18).font_semibold().child("Read this change in the order it makes sense"))
-        .child(div().text_size(13).text_color(t.muted).child("Claude groups related edits into steps, orders them so each builds on the last, and explains what each one changes. It explains; it doesn't judge the code. Every edit it leaves out is still listed at the end."))
+        .child(div().text_size(13).text_color(t.muted).child("pi agrupa los cambios relacionados en pasos, los ordena para que cada uno se apoye en el anterior y explica que cambia cada uno. Explica; no juzga el codigo. Every edit it leaves out is still listed at the end."))
         .child(h_flex().gap(8).items_center().flex_wrap()
           .child(chip(t, `${d.fileCount} file${d.fileCount === 1 ? "" : "s"}`))
           .child(chip(t, `${d.hunkCount} hunk${d.hunkCount === 1 ? "" : "s"}`))
@@ -987,7 +988,7 @@ export class Walkthrough {
           .when(d.generatedPaths.length > 0, (e) => e.child(chip(t, `${d.generatedPaths.length} generated, not sent`)))
           .when(d.unread.length > 0, (e) => e.child(chip(t, `${d.unread.length} not read`)))
           .when(Boolean(this.task), (e) => e.child(chip(t, `Task: ${this.task.short}`, t.accent).tooltip(`${this.task.label}: each request in it is matched to the steps that carry it out. The task menu changes or turns it off.`))))
-        .when(this.claude === null, (e) => e.child(this.notice(t, t.ansi1, "Claude Code's `claude` isn't installed, or isn't on the PATH Herdr starts programs with. Walkthroughs are written by `claude -p`.")))
+        .when(this.claude === null, (e) => e.child(this.notice(t, t.ansi1, "pi no esta instalado, o no esta en el PATH con el que Herdr arranca programas. Los walkthroughs los escribe `pi -p`.")))
         .when(tooBig, (e) => e.child(this.notice(t, t.ansi1, "This diff is too large to send whole, and a walkthrough of part of it would read as complete. Pick a narrower scope.")))
         .when(d.hunkCount === 0 && d.files.length > 0, (e) => e.child(this.notice(t, t.muted, d.generatedPaths.length ? "Only generated files changed; they aren't sent to the model." : "No changed lines to read: binary files, renames or mode changes only.")))
         .when(Boolean(this.genError), (e) => e.child(this.notice(t, t.ansi1, this.genError)))
@@ -1021,7 +1022,7 @@ export class Walkthrough {
     return v_flex().size_full().items_center().justify_center().gap(12)
       .child(v_flex().gap(10)
         .child(row("done", "Read the diff", `${j.hunkCount} hunk${j.hunkCount === 1 ? "" : "s"}`))
-        .child(row(this.job.done ? "done" : "run", `Asking Claude ${modelOf(j.model).name}`, formatElapsed(Date.now() - j.started)))
+        .child(row(this.job.done ? "done" : "run", `Pidiendo a ${modelOf(j.model).name}`, formatElapsed(Date.now() - j.started)))
         .child(row(this.job.done ? "run" : "wait", "Putting the steps together")))
       .child(div().mt(8).max_w(480).text_center().text_size(11.5).text_color(t.dim).child("It runs in the background: close this and come back, the walkthrough will be waiting."))
       .child(button(t, "cancel-run", "Cancel", (_e, cx) => cx.spawn(async (cx) => this.cancel(cx)), { small: true }));

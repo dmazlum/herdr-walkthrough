@@ -24,7 +24,7 @@ export const SCOPES = [
   { key: "branch", label: "Branch", about: "Everything this branch adds to its base, committed or not" },
   { key: "commit", label: "Commit", about: "One commit, against its first parent" },
   { key: "pr", label: "Pull request", about: "An open pull request on GitHub, as GitHub shows its changes (needs gh)" },
-  { key: "turn", label: "Last turn", about: "What an agent changed while answering one prompt (needs the turn hooks)" },
+  { key: "turn", label: "Last turn", about: "What an agent changed while answering one prompt (recorded while the walkthrough is open)" },
 ];
 
 export async function git(exec, cwd, args) {
