@@ -1,6 +1,6 @@
 # ◆ Walkthrough
 
-[![CI](https://github.com/dmazlum/herdr-walkthrough/actions/workflows/ci.yml/badge.svg)](https://github.com/dmazlum/herdr-walkthrough/actions/workflows/ci.yml)
+[![CI](https://github.com/singerxt/herdr-walkthrough/actions/workflows/ci.yml/badge.svg?branch=blueprint-contracts)](https://github.com/singerxt/herdr-walkthrough/actions/workflows/ci.yml)
 
 Read a change in the order it makes sense, not in the order of its file names. In
 [Herdr](https://herdr.dev), Claude groups a diff's edits into steps, puts them in an order
@@ -9,6 +9,32 @@ talks about is shown under its explanation, in syntax colours from your theme.
 
 It explains, it doesn't judge. There are no findings, scores or verdicts. Built for reading
 what an agent (or a colleague) just wrote before you accept it.
+
+## This fork
+
+This is Mateusz's customized fork of
+[dmazlum/herdr-walkthrough](https://github.com/dmazlum/herdr-walkthrough), based on upstream
+**0.4.0**. The default branch is **`blueprint-contracts`**. Upstream `main` is retained
+separately; features introduced in upstream 0.5 through 0.8 are not included here.
+
+- **Recap first.** A summary of the change and a native blueprint of its architecture.
+- **Interactive blueprint.** Source-backed component status and details, connection labels,
+  evidence-based groups, and focus on a selected component and its direct connections.
+  File links jump to the relevant walkthrough section.
+- **Contracts.** Dedicated database, Protobuf and API pages when the diff changes those
+  contracts, with before/after comparisons, compatibility impact and deployment order
+  when supported by the diff.
+- **Evidence per change.** Open the exact supporting diff or jump to every walkthrough
+  step that explains it. Missing source and changes without a matching step are marked.
+- **Selected language respected.** Contract controls and exported labels support all
+  fourteen selectable languages, and generated explanations follow the selected language.
+
+Older reports remain readable. Regenerate them to add blueprint metadata or contract pages,
+or to replace explanations generated in the wrong language. Source toggles and step links
+work with existing reports that already contain the required evidence.
+
+The screenshot below shows the original upstream interface. This fork also adds the Recap,
+blueprint and Contracts described above.
 
 ![Walkthrough](preview.png)
 
@@ -55,12 +81,12 @@ a Codex agent, or any other.
 
 ## Install
 
-In Herdr, ask your agent to add `github.com/dmazlum/herdr-walkthrough` (it's listed at
-[herdr.dev/mods](https://herdr.dev/mods)): it reads [`RECIPE.md`](RECIPE.md) and every file,
+In Herdr, ask your agent to add `github.com/singerxt/herdr-walkthrough` from the
+`blueprint-contracts` branch: it reads [`RECIPE.md`](RECIPE.md) and every file,
 copies `mods/walkthrough`, merges [`keys.json`](keys.json) and checks the mod. Or by hand:
 
 ```sh
-git clone https://github.com/dmazlum/herdr-walkthrough
+git clone --branch blueprint-contracts https://github.com/singerxt/herdr-walkthrough
 cp -R herdr-walkthrough/mods/walkthrough ~/.config/herdr-app/mods/
 herdr-app check ~/.config/herdr-app/mods/walkthrough
 ```
@@ -92,12 +118,12 @@ ln -s "$PWD/herdr-walkthrough/mods/walkthrough" ~/.config/herdr-app/mods/walkthr
 Herdr updates its own mods, not ones you added: yours is a copy, and nothing tells you
 when this repo changes. To hear about a new version, watch the repo for releases (on
 GitHub: **Watch → Custom → Releases**). Each
-[release](https://github.com/dmazlum/herdr-walkthrough/releases) says what changed and whether
+[release](https://github.com/singerxt/herdr-walkthrough/releases) says what changed and whether
 `keys.json` did; merge it again when it did.
 
 The version you have is `"version"` in `~/.config/herdr-app/mods/walkthrough/mod.json`. To
 update, ask your agent to replace that folder with the latest `mods/walkthrough` from
-`github.com/dmazlum/herdr-walkthrough`. Adding it again isn't enough: an agent never
+`github.com/singerxt/herdr-walkthrough` on `blueprint-contracts`. Adding it again isn't enough: an agent never
 overwrites a mod, it would add a second copy under a new name. If the mod was renamed when
 it was added (a name clash), the renamed folder is the one to replace, renamed the same way.
 Or by hand:

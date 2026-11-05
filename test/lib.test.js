@@ -162,11 +162,11 @@ test("buildDigest aliases reviewable hunks and leaves generated ones out", () =>
   assert.equal(d.files.length, 5);
 });
 
-test("buildPrompt sizes the ask and adds the language only when not English", () => {
+test("buildPrompt sizes the ask and makes the output language explicit, including English", () => {
   const en = buildPrompt({ digest: "D", fileCount: 1, hunkCount: 10, what: "W" });
   assert.match(en.prompt, /Aim for about 4 step\(s\)/);
   assert.ok(en.prompt.endsWith("D"));
-  assert.ok(!en.system.includes("Write all prose in"));
+  assert.match(en.system, /Write all prose in English/);
   const tr = buildPrompt({ digest: "D", fileCount: 1, hunkCount: 10, what: "W", language: "tr", preferences: "Be brief." });
   assert.match(tr.system, /Write all prose in Turkish/);
   assert.match(tr.system, /<preferences>\nBe brief\.\n<\/preferences>/);

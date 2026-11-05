@@ -8,6 +8,26 @@ change and never judges it.
 
 ![Walkthrough](preview.png)
 
+## Fork additions
+
+This fork is based on upstream 0.4.0. Install from `singerxt/herdr-walkthrough`, branch
+`blueprint-contracts`; the `main` branch retains upstream code.
+
+The first page is Recap, with a native interactive blueprint. Components can show validated
+change status, source-file navigation, connection labels and evidence-based groups.
+Selecting a component highlights its direct connections; Show all clears that focus.
+
+Conditional database, Protobuf and API contract pages follow Recap before the code steps.
+Each change has a before/after comparison, its own exact source diff toggle and links to
+matching walkthrough steps. Stale source and changes without a matching step are marked.
+Contract UI and Markdown labels follow the selected/saved report language; generation
+explicitly requests the chosen language. Existing wrong-language prose needs regeneration.
+
+Copy only `mods/walkthrough` when installing; merge `keys.json` with existing shortcuts,
+then run `herdr-app check`. Do not replace unrelated mods or shortcut entries. New
+blueprint metadata and contract pages require report regeneration; older reports remain
+readable. The detailed upstream behavior below describes the original 0.4.0 foundation.
+
 ## What you see
 
 A dialog 74% of the window wide and 80% tall (`modal`), on `theme().popover`; as a pane, on
