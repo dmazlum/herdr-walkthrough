@@ -19,6 +19,7 @@ import { mergeRead } from "./lib/read.js";
 import { jobScript, readOutcome, isRunCommand } from "./lib/job.js";
 import { parseListing, resolveEnds, LISTING } from "./lib/turns.js";
 import { taskKey, taskCacheKey, parseTranscript, projectSlug, jsonPath, TRANSCRIPTS } from "./lib/task.js";
+import { parsePiSessions, parseCodexSessions, parseOpencodePrompts, mergePrompts } from "./lib/agents.js";
 
 const MAX_ENTRIES = 200;
 export const dataDir = () => `${home()}/.herdr/walkthrough`;
@@ -26,6 +27,13 @@ const entryPath = (key) => `${dataDir()}/entries/${key}.json`;
 const pointerPath = (place) => `${dataDir()}/pointers/${place}.json`;
 const jobDir = (place) => `${dataDir()}/jobs/${place}`;
 const readPath = (top) => `${dataDir()}/read/${longHash(top)}.json`;
+
+/** readTextFile se queda corto con los ficheros grandes de un job (out.json de varios MB): cat primero. */
+async function readBig(path) {
+  const r = await exec("cat", [path]).catch(() => null);
+  if (r?.code === 0 && r.stdout !== "") return r.stdout;
+  return readTextFile(path).catch(() => null);
+}
 
 async function readJson(path) {
   try {
@@ -77,12 +85,19 @@ export async function postComment(top, number, text) {
   return (r.stdout ?? "").trim().split("\n").pop() ?? "";
 }
 
-/** Whether Claude Code's `claude` can be started: its version, or null. */
-export async function claudeVersion() {
+/** Whether pi can be started: its version, or null. */
+export async function piVersion() {
   try {
-    const r = await exec("claude", ["--version"]);
+    // Mismo binario que usa el job: el PATH de Herdr no siempre ve el pi de fnm.
+    const r = await exec(await piBinary(), ["--version"]);
     return r.code === 0 ? r.stdout.trim() : null;
   } catch { return null; }
+}
+
+/** The pi binary a job runs with: the one Herdr sees, else fnm's default alias. */
+async function piBinary() {
+  const r = await exec("sh", ["-c", 'command -v pi 2>/dev/null || printf %s "$HOME/.local/share/fnm/aliases/default/bin/pi"']).catch(() => null);
+  return (r?.stdout ?? "").trim().split("\n")[0] || "pi";
 }
 
 /**
@@ -100,17 +115,40 @@ export async function readDiff(repo, source) {
 export const keyFor = (repo, diff, model, language, preferences = "", task = null) =>
   cacheKey({ top: repo.top, source: diff.sk, model, language, preferences, files: diff.files, task: taskCacheKey(task) });
 
+/** Sessions of this repository changed in the last `minutes`. */
+async function filesSince(root, minutes) {
+  const r = await exec("sh", ["-c", 'find "$0" -name "*.jsonl" -mmin -"$1" 2>/dev/null | head -300', root, String(minutes)]).catch(() => null);
+  return (r?.stdout ?? "").split("\n").filter(Boolean);
+}
+
+/** Prompts typed into opencode sessions of this repository since `since` (ms). */
+async function opencodePrompts(top, since) {
+  const script = `${appHome()}/mods/walkthrough/lib/opencode-prompts.py`;
+  const r = await exec("python3", [script, top, String(Math.floor(since))]).catch(() => null);
+  return parseOpencodePrompts(r?.stdout ?? "", since);
+}
+
 /**
- * What people typed into Claude Code sessions working in a repository since
- * `since` (ms), oldest first: the task of a change made without the hooks
- * that record turns. Read from Claude Code's transcripts (its folder names
- * the project by its path; a session started in a subfolder counts too).
+ * What people typed into the agents working in a repository since `since`
+ * (ms), oldest first: the task of a change. Read from Claude Code's
+ * transcripts when it is installed, and from pi, opencode and codex, which are
+ * the agents used on this machine.
  */
 export async function transcriptMessages(top, since) {
   // Claude Code shortens very long folder names; the prefix finds them, and each line's cwd decides.
   const prefix = projectSlug(top).slice(0, 120);
-  const r = await exec("sh", ["-c", TRANSCRIPTS, prefix, String(Math.floor(since / 1000)), jsonPath(top)]).catch(() => null);
-  return parseTranscript(r?.stdout ?? "", { top, since });
+  const minutes = Math.min(43_200, Math.max(1, Math.ceil((Date.now() - since) / 60_000) + 1));
+  const [claude, piFiles, codexFiles, opencode] = await Promise.all([
+    exec("sh", ["-c", TRANSCRIPTS, prefix, String(Math.floor(since / 1000)), jsonPath(top)]).catch(() => null),
+    filesSince(`${home()}/.pi/agent/sessions`, minutes),
+    filesSince(`${home()}/.codex/sessions`, minutes),
+    opencodePrompts(top, since),
+  ]);
+  const pi = [];
+  for (const f of piFiles) pi.push(...parsePiSessions((await readBig(f)) ?? "", top, since));
+  const codex = [];
+  for (const f of codexFiles) codex.push(...parseCodexSessions((await readBig(f)) ?? "", top, since));
+  return mergePrompts([parseTranscript(claude?.stdout ?? "", { top, since }), pi, codex, opencode]);
 }
 
 /** The reader's own wishes for every walkthrough, or "". */
@@ -185,6 +223,36 @@ export async function turnsFolder(top) {
   return dir;
 }
 
+/**
+ * A turn recorded by the walkthrough itself, without agent hooks: a snapshot of the
+ * working tree taken when a prompt was sent (id `<startedSeconds>-<random>`).
+ */
+export async function startTurn(top, { prompt, session = null, terminal = null, started = Date.now() } = {}) {
+  const folder = await turnsFolder(top);
+  if (!folder) return null;
+  const id = `${Math.floor(started / 1000)}-${Math.floor(Math.random() * 900 + 100)}`;
+  const dir = `${folder}/${id}`;
+  await exec("mkdir", ["-p", `${dir}/objects`]).catch(() => undefined);
+  let snap;
+  try { snap = await snapshotTree(exec, top, { index: `${dir}/index`, objects: `${dir}/objects` }); }
+  catch { await exec("rm", ["-rf", dir]).catch(() => undefined); return null; }
+  await write(`${dir}/start.json`, JSON.stringify({ prompt, session_id: session, cwd: top, hook_event_name: "UserPromptSubmit", recorded_by: "walkthrough" }));
+  await write(`${dir}/start.big`, (snap.big ?? []).map((p) => `${p}\n`).join(""));
+  await write(`${dir}/start.meta`, `tree=${snap.tree}\nstarted=${Math.floor(started / 1000)}\nsession=${session ?? ""}\nterminal=${terminal ?? ""}\n`);
+  return { id, dir, started, startTree: snap.tree, startBig: snap.big ?? [] };
+}
+
+/** Closes a turn recorded here: the working tree now, marked interrupted (no agent Stop hook ended it). */
+export async function endTurn(top, turn, { ended = Date.now() } = {}) {
+  if (!turn?.dir) return null;
+  let snap;
+  try { snap = await snapshotTree(exec, top, { index: `${turn.dir}/now.index`, objects: `${turn.dir}/objects` }); }
+  catch { return null; }
+  await write(`${turn.dir}/end.big`, (snap.big ?? []).map((p) => `${p}\n`).join(""));
+  await write(`${turn.dir}/end.meta`, `tree=${snap.tree}\nended=${Math.floor(ended / 1000)}\ninterrupted=1\n`);
+  return { ...turn, endTree: snap.tree, ended };
+}
+
 /** A repository's turns, newest first, each with where it ended (lib/turns.js; `ends`: resolveEnds' options). */
 export async function listTurns(folder, ends = {}) {
   if (!folder) return [];
@@ -234,7 +302,7 @@ export async function jobOf(repo, sk) {
   const dir = jobDir(placeKey(repo.top, sk));
   const meta = await readJson(`${dir}/meta.json`);
   if (!meta) return null;
-  const code = await readTextFile(`${dir}/code`).catch(() => null);
+  const code = await readBig(`${dir}/code`);
   return { dir, meta, done: code !== null, code };
 }
 
@@ -252,15 +320,18 @@ export async function startJob(repo, diff, { key, model, language, prompt, sourc
     // Kept with the walkthrough: where its task came from, and the key that tells when the task has changed since.
     task: task ? { from: task.from, label: task.label, short: task.short, text: task.text, context: task.context ?? "", key: taskKey(task) } : null,
   };
-  await writeTextFile(`${dir}/system.txt`, prompt.system, null);
+  // pi no tiene --json-schema: el schema viaja en el system prompt y la respuesta se parsea del texto.
+  const schema = schemaFor(Boolean(task));
+  const systemText = `${prompt.system}\n\nAnswer with ONE JSON object that matches this JSON Schema exactly, and nothing else:\n${JSON.stringify(schema)}`;
+  await writeTextFile(`${dir}/system.txt`, systemText, null);
   await writeTextFile(`${dir}/prompt.txt`, prompt.prompt, null);
-  await writeTextFile(`${dir}/schema.json`, JSON.stringify(schemaFor(Boolean(task))), null);
+  await writeTextFile(`${dir}/schema.json`, JSON.stringify(schema), null);
   await writeTextFile(`${dir}/run.sh`, jobScript(), null);
   await writeTextFile(`${dir}/meta.json`, JSON.stringify(meta), null);
   // Detached: exec returns at once, and the run outlives this window.
   // run.sh stops claude itself at the deadline, so a hung run ends even with no window open.
   const seconds = String(Math.ceil((meta.deadline - meta.started) / 1000));
-  const launched = await exec("sh", ["-c", "nohup sh \"$0\" \"$1\" \"$2\" >/dev/null 2>&1 &", `${dir}/run.sh`, model, seconds]);
+  const launched = await exec("sh", ["-c", "nohup sh \"$0\" \"$1\" \"$2\" \"$3\" >/dev/null 2>&1 &", `${dir}/run.sh`, await piBinary(), model, seconds]);
   if (launched.code !== 0) {
     await exec("rm", ["-rf", dir]);
     throw new Error((launched.stderr || launched.stdout || `sh exited with ${launched.code}`).trim());
@@ -276,6 +347,13 @@ export async function startJob(repo, diff, { key, model, language, prompt, sourc
 async function runPid(dir, known = null) {
   const pid = known ?? (await readTextFile(`${dir}/pid`).catch(() => null))?.trim();
   if (!pid || !/^\d+$/.test(pid)) return null;
+  // pi reescribe el título del proceso (ps muestra solo "pi"): la hora de
+  // arranque guardada por run.sh dice si el número sigue siendo ese proceso.
+  const started = (await readTextFile(`${dir}/started`).catch(() => null))?.trim();
+  const ps = await exec("ps", ["-o", "lstart=", "-p", pid]).catch(() => null);
+  const now = ps?.code === 0 ? String(ps.stdout ?? "").trim() : "";
+  if (!now) return null;
+  if (started) return now.replace(/\s+/g, " ") === started.replace(/\s+/g, " ") ? pid : null;
   const r = await exec("ps", ["-o", "command=", "-p", pid]).catch(() => null);
   return r?.code === 0 && isRunCommand(r.stdout) ? pid : null;
 }
@@ -292,12 +370,14 @@ async function stopRun(dir) {
 export async function alive(job) {
   job.pid ??= (await readTextFile(`${job.dir}/pid`).catch(() => null))?.trim() || null;
   if (!job.pid) return Date.now() - job.meta.started < 10_000; // not started yet
-  return (await runPid(job.dir, job.pid)) !== null;
+  if (await runPid(job.dir, job.pid)) return true;
+  // run.sh escribe pid y started justo después de lanzar pi: no matar el job en ese hueco.
+  return Date.now() - job.meta.started < 15_000;
 }
 
 /** The cheap look taken every second: the job, finished, once its code is there; else null. */
 export async function finished(job) {
-  const code = await readTextFile(`${job.dir}/code`).catch(() => null);
+  const code = await readBig(`${job.dir}/code`);
   return code === null ? null : { ...job, done: true, code };
 }
 
@@ -316,7 +396,7 @@ export async function finishJob(job) {
   const claimed = `${job.dir}.taken-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
   const moved = await exec("mv", [job.dir, claimed]).catch(() => ({ code: 1 }));
   if (moved.code !== 0) return null;
-  const read = (name) => readTextFile(`${claimed}/${name}`).catch(() => null);
+  const read = (name) => readBig(`${claimed}/${name}`);
   try {
     const { raw, cost } = readOutcome({ out: await read("out.json"), err: await read("err.txt"), code: job.code });
     const walkthrough = normalize(raw, job.meta.idByAlias, job.meta.digestFiles, { asks: Boolean(job.meta.task) });

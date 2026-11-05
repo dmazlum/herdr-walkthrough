@@ -298,27 +298,29 @@ test("cache keys change with the code, model and language", () => {
   assert.equal(deadline(10_000), 900_000);
 });
 
-test("readOutcome reads structured output, text answers and failures", () => {
-  assert.deepEqual(readOutcome({ out: JSON.stringify({ subtype: "success", structured_output: { a: 1 }, total_cost_usd: 0.01 }) }), { raw: { a: 1 }, cost: 0.01 });
-  assert.deepEqual(readOutcome({ out: JSON.stringify({ subtype: "success", result: "```json\n{\"a\":2}\n```" }) }).raw, { a: 2 });
-  assert.throws(() => readOutcome({ out: JSON.stringify({ is_error: true, result: "Not logged in · Please run /login" }) }), (e) => e.code === "login");
+test("readOutcome reads the last pi turn, text answers and failures", () => {
+  const turn = (text, cost) => JSON.stringify({ type: "turn_end", message: { content: [{ type: "text", text }], usage: { cost: { total: cost } } } });
+  assert.deepEqual(readOutcome({ out: turn("{\"a\":1}", 0.01) }), { raw: { a: 1 }, cost: 0.01 });
+  assert.deepEqual(readOutcome({ out: turn("```json\n{\"a\":2}\n```", null) }).raw, { a: 2 });
+  assert.throws(() => readOutcome({ out: "{\"type\":\"error\",\"message\":\"Not logged in · run pi auth\"}" }), (e) => e.code === "login");
   assert.throws(() => readOutcome({ out: "", err: "boom\nlast line", code: "1\n" }), /boom last line/);
   assert.throws(() => readOutcome({ out: null, err: "", code: "127" }), /exited with 127/);
 });
 
 test("only a walkthrough run's command line is taken for one", () => {
-  assert.ok(isRunCommand("claude -p --model haiku --tools  --no-session-persistence --strict-mcp-config --setting-sources  --disable-slash-commands --json-schema {}"));
-  assert.ok(isRunCommand("node /x/cli.js -p --no-session-persistence --strict-mcp-config --disable-slash-commands --json-schema {}"));
+  assert.ok(isRunCommand("pi -p --mode json --no-extensions --no-skills --no-mcp"));
+  assert.ok(isRunCommand("node /x/pi.js --mode json --no-extensions --no-skills"));
   assert.ok(!isRunCommand("/Applications/Zed.app/Contents/MacOS/zed"));
-  assert.ok(!isRunCommand("claude --resume"));
+  assert.ok(!isRunCommand("pi --resume"));
   assert.ok(!isRunCommand(""));
 });
 
-test("the job script passes no tools and quotes empty flags", () => {
+test("the job script runs pi with no tools and records its start", () => {
   const s = jobScript();
-  assert.match(s, /'--tools' '' /);
-  assert.match(s, /'--setting-sources' '' /);
-  assert.match(s, /--model "\$1"/);
+  assert.match(s, /'--mode' 'json'/);
+  assert.match(s, /'--no-tools'/);
+  assert.match(s, /--model "\$2"/);
+  assert.match(s, /ps -o lstart= -p "\$pid"/);
   assert.match(s, /mv code\.tmp code/);
 });
 

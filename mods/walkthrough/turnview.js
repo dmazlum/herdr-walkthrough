@@ -6,14 +6,14 @@ import { div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { agents, notify, settings, watchFolder } from "herdr";
 import { turnSource, pickTurn, keepTurn, lastFinished, isOpen, autoWritable, firstLine, ago, hookSettings, HOOK_WAIT } from "./lib/turns.js";
-import { turnsFolder, listTurns, closeTurn, readDiff, readPreferences, keyFor, hasEntry, jobOf, preparePrompt, fits, startJob, finished, finishJob, copyText, hookScript } from "./engine.js";
+import { turnsFolder, listTurns, closeTurn, readDiff, readPreferences, keyFor, hasEntry, jobOf, preparePrompt, fits, startJob, finished, finishJob, copyText, hookScript, startTurn, endTurn, transcriptMessages } from "./engine.js";
 import { button, formatElapsed } from "./ui.js";
 
 // Written without a click only by the cheapest model, and only for a change small enough to be cheap.
-export const AUTO_MODEL = "haiku";
+export const AUTO_MODEL = "deepseek/deepseek-flash";
 export const AUTO_MAX_HUNKS = 300;
 export const AUTO = [
-  { key: "on-open", name: "While open", about: "When an agent's turn ends, and on opening, write its walkthrough with Haiku (300 hunks at most)" },
+  { key: "on-open", name: "While open", about: "When an agent's turn ends, and on opening, write its walkthrough with deepseek-flash (300 hunks at most)" },
   { key: "off", name: "Off", about: "Only when you press Generate" },
 ];
 export const DEFAULT_AUTO = "on-open";
@@ -30,6 +30,46 @@ export async function startTurns(v, cx) {
       v.turnsDirty = true;
     }
   });
+}
+
+/**
+ * Records turns without agent hooks: while the walkthrough is open it reads the
+ * sessions of pi, opencode and codex for this repository, and when a prompt
+ * appears it snapshots the working tree as the turn's start; when the agent goes
+ * quiet, snapshots the end. A prompt sent with the panel closed is not recorded.
+ */
+export function recordAgentTurns(v, cx) {
+  v.rec = { watermark: Date.now(), turn: null, seenAt: 0 };
+  cx.timer.every(8000, (cx2) => cx2.spawn(async () => {
+    if (!v.repo || v.remote || !v.turnsDir) return;
+    const now = Date.now();
+    let msgs = [];
+    try { msgs = await transcriptMessages(v.repo.top, v.rec.watermark); } catch { msgs = []; }
+    v.rec.watermark = now - 2000;
+    const fresh = msgs.filter((m) => (m.at || 0) > v.rec.seenAt);
+    if (fresh.length) {
+      for (const m of fresh) {
+        if ((m.at || 0) <= v.rec.seenAt) continue;
+        // El turno anterior termina donde empezó este prompt.
+        if (v.rec.turn) { await endTurn(v.repo.top, v.rec.turn, { ended: m.at }).catch(() => undefined); v.rec.turn = null; }
+        v.rec.seenAt = m.at || now;
+        v.rec.turn = await startTurn(v.repo.top, { prompt: m.text, session: m.session ?? null, terminal: v.from ?? null, started: v.rec.seenAt }).catch(() => null);
+      }
+      await loadTurns(v);
+      // El diff del turno se lee despues de que la lista lo tenga: sin esto el panel se queda en Reading the diff....
+      if (typeof v.reload === "function") await v.reload(cx2);
+      cx2.notify();
+      return;
+    }
+    // Sin prompt nuevo: un turno abierto se cierra cuando el agente lleva un rato quieto.
+    if (v.rec.turn && now - Math.max(v.rec.seenAt, v.rec.turn.started) > 90_000) {
+      await endTurn(v.repo.top, v.rec.turn).catch(() => undefined);
+      v.rec.turn = null;
+      await loadTurns(v);
+      if (typeof v.reload === "function") await v.reload(cx2);
+      cx2.notify();
+    }
+  }));
 }
 
 /**
@@ -174,32 +214,13 @@ export async function autoGenerate(v, cx, turn) {
 }
 
 /** The Last turn tab before any turn was recorded: what the hooks do, and setting them up in three steps. */
+/** The Last turn tab before any turn was recorded: how turns are recorded here. */
 export function hookHelp(v, t) {
-  // One line per hook, as the README shows them; Copy settings copies exactly what is shown.
-  const snippet = hookSettings(hookScript(), { compact: true });
-  const font = settings().font_family ?? "JetBrains Mono";
-  const step = (n, title, ...body) => h_flex().w_full().px(14).py(12).gap(12).items_start().when(n > 1, (e) => e.border_t(1).border_color(t.border))
-    .child(div().flex_none().size(22).rounded(11).bg(t.accent + "26").flex().items_center().justify_center().text_size(11.5).font_semibold().text_color(t.accent).child(String(n)))
-    .child(v_flex().flex_1().min_w(0).gap(6).child(div().text_size(13).font_semibold().child(title)).children(body));
   const small = (text) => div().text_size(12).line_height(1.5).text_color(t.muted).child(text);
   return v_flex().id("turn-help").size_full().overflow_y_scrollbar().items_center().p(28)
-    .child(v_flex().w_full().max_w(620).gap(12)
-      .child(div().text_size(18).font_semibold().child("Record the agent's turns"))
-      .child(div().text_size(13).line_height(1.5).text_color(t.muted).child("Last turn shows exactly what an agent changed while answering one prompt. Two Claude Code hooks take a snapshot of your working tree, outside the repository's .git, when you send a prompt and when the agent stops."))
-      .child(v_flex().w_full().rounded(10).border_1().border_color(t.border)
-        .child(step(1, "Copy the two hooks",
-          // A line longer than the box wraps under its own indent instead of spilling out of it.
-          v_flex().w_full().min_w(0).p(10).rounded(8).border_1().border_color(t.border).bg(t.raised).font_family(font).text_size(11)
-            .children(snippet.split("\n").map((line) => {
-              const indent = /^ */.exec(line)[0].length;
-              return div().w_full().min_w(0).pl(indent * 7).child(line.trimStart() || " ");
-            })),
-          h_flex().gap(10).items_center()
-            .child(button(t, "copy-hooks", "Copy settings", (_e, cx) => cx.spawn(async (cx) => {
-              try { await copyText(snippet); v.flash("✓ Copied"); } catch (e) { v.flash(`Couldn't copy: ${String(e?.message ?? e)}`); }
-              cx.notify();
-            }), { kind: "solid", small: true }))
-            .when(Boolean(v.sent), (e) => e.child(div().text_size(11.5).text_color(v.sent.startsWith("✓") ? t.ansi2 : t.dim).child(v.sent)))))
-        .child(step(2, "Add them to ~/.claude/settings.json", small("Next to any hooks you already have. The walkthrough never edits your settings itself.")))
-        .child(step(3, "Send your agent a prompt", small("Turns are recorded from then on. Snapshots go to ~/.herdr/walkthrough/turns/; the newest 20 per repository are kept.")))));
+    .child(v_flex().w_full().max_w(620).gap(10)
+      .child(div().text_size(18).font_semibold().child("Los turnos se graban solos"))
+      .child(div().text_size(13).line_height(1.5).text_color(t.muted).child("Last turn muestra exactamente que cambio un agente mientras respondia un prompt. No hacen falta hooks de Claude: con este panel abierto, el walkthrough lee las sesiones de pi, opencode y codex en este repositorio y guarda una foto del arbol de trabajo cuando mandas un prompt y cuando el agente se queda quieto."))
+      .child(small("Las fotos van a ~/.herdr/walkthrough/turns/ y se guardan las ultimas 20 por repositorio."))
+      .child(small("Un prompt enviado con el panel cerrado no se graba.")));
 }

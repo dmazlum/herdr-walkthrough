@@ -1,4 +1,4 @@
-// Walkthrough: a change read in the order it makes sense. Claude groups the
+// Walkthrough: a change read in the order it makes sense. pi groups the
 // diff's hunks into steps, orders them, and explains each one; the code of
 // each step is shown under its explanation.
 //
