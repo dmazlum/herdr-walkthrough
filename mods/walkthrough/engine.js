@@ -386,6 +386,19 @@ export async function cancelJob(job) {
   await exec("rm", ["-rf", job.dir]);
 }
 
+/** Un job fallido deja sus ficheros 24 h para poder mirarlos (out/err/code/meta). */
+const FAILED_TTL_MIN = 24 * 60;
+async function keepFailedJob(place, claimed) {
+  const rootFailed = `${dataDir()}/failed`;
+  await exec("mkdir", ["-p", rootFailed]).catch(() => undefined);
+  const name = `${place}-${Date.now().toString(36)}`;
+  const to = `${rootFailed}/${name}`;
+  const moved = await exec("mv", [claimed, to]).catch(() => ({ code: 1 }));
+  if (moved.code !== 0) { await exec("rm", ["-rf", claimed]).catch(() => undefined); return null; }
+  await exec("sh", ["-c", `cd "$0" && find . -mindepth 1 -maxdepth 1 -mmin +${FAILED_TTL_MIN} -exec rm -rf {} + 2>/dev/null`, rootFailed]).catch(() => undefined);
+  return `~/.herdr/walkthrough/failed/${name}`;
+}
+
 /**
  * A finished job → a stored walkthrough (and the pointer at it). The job's
  * folder goes either way; a failure is thrown with the reason. Two windows on
@@ -407,9 +420,13 @@ export async function finishJob(job) {
     await write(entryPath(key), JSON.stringify(entry));
     await write(pointerPath(placeKey(top, sk)), JSON.stringify({ key, top, source: sk }));
     await evict();
-    return entry;
-  } finally {
     await exec("rm", ["-rf", claimed]);
+    return entry;
+  } catch (e) {
+    // Un fallo deja la carpeta del job para poder mirarla durante 24 h.
+    const kept = await keepFailedJob(job.dir.split("/").pop(), claimed);
+    if (kept) e.message = `${e.message} · files in ${kept}`;
+    throw e;
   }
 }
 
