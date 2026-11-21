@@ -5,7 +5,7 @@
 **Read a change in the order it makes sense, not in the order of its file names.**
 
 A [Herdr](https://herdr.dev) mod for reading what an agent, or a colleague, just wrote
-before you accept it. Claude groups the diff into steps, puts them in an order where each
+before you accept it. A model groups the diff into steps, puts them in an order where each
 one builds on the last, and explains what each step changes, with its code right below.
 
 It explains; it doesn't judge. No findings, no scores, no verdicts.
@@ -14,7 +14,8 @@ It explains; it doesn't judge. No findings, no scores, no verdicts.
 
 ## Quick start
 
-You need the **Herdr desktop app 0.1.9+**, **git**, and **Claude Code** (`claude`, logged in).
+You need the **Herdr desktop app 0.1.9+**, **git**, and **Claude Code** (`claude`, logged in)
+or **pi** (`pi`, set up with a model).
 
 1. **Install.** In Herdr, ask your agent:
    *"Add the mod github.com/dmazlum/herdr-walkthrough"*. It's also listed at
@@ -24,7 +25,8 @@ You need the **Herdr desktop app 0.1.9+**, **git**, and **Claude Code** (`claude
    and press **Generate**. A small change costs about $0.002 with Haiku.
 
 Then read with **←** and **→**. Want the agent's last turn written up for you, without a
-click? Add the two [Last turn hooks](#last-turn).
+click? Add the two [Last turn hooks](#last-turn), or, for pi, codex or opencode, turn on
+[recording](#agents-without-hooks).
 
 ## What you get
 
@@ -88,7 +90,7 @@ A walkthrough opens on the **task**: each thing that was asked for, marked
 Each step says which request it serves, and steps no request asked for are listed too.
 
 You don't have to type the task. It's found for you: the Last turn's prompt, the pull
-request's description, the commit's message, or the prompts you sent to Claude Code since
+request's description, the commit's message, or the prompts you sent to your agents (Claude Code, pi, codex, opencode) since
 the last commit. You can also write your own, or turn it off, from the **Matched against** menu. It
 says *where* a request shows up, never whether it's done well.
 
@@ -123,8 +125,9 @@ says *where* a request shows up, never whether it's done well.
   writes up the agent's last turn with Haiku if it has none yet. Open as a pane, it writes
   one each time an agent in its tab finishes, and tells you. Over 300 hunks it waits for
   Generate.
-- **Your model and language.** Haiku (default), Sonnet or Opus; explanations in fourteen
-  languages, starting from your system's. Code and paths stay as they are.
+- **Your model and language.** Claude Code (default) with Haiku (default), Sonnet or Opus,
+  or pi with its own default model or a DeepSeek one; explanations in fourteen languages,
+  starting from your system's. Code and paths stay as they are.
 
 ## Keys
 
@@ -145,6 +148,8 @@ says *where* a request shows up, never whether it's done well.
 | --- | --- |
 | **Matched against** menu | Found (default), Your own… (write it), or Off; kept per repository and tab |
 | Last turn → **⚡ Auto** | On (default): write the last turn's walkthrough without a click. One click turns it off: only on Generate |
+| Last turn → **● Recording** | Off (default): record the turns of pi, codex and opencode while the walkthrough is open |
+| Backend menu | Claude Code (default) or pi; each has its own models |
 | `walkthrough.generate`, `.cancel`, `.next`, `.prev`, `.copy`, `.unread`, `.task`, `.recap` | Generate, cancel, move, Copy as Markdown, Unread only, write your own task and go to Recap |
 
 </details>
@@ -186,6 +191,22 @@ one the agent stopped at, so edits you made in between count as the turn's. Thes
 are labelled *"no Stop recorded, ended when seen idle"*, and Auto leaves them for you to
 Generate.
 
+### Agents without hooks
+
+pi, codex and opencode have no hooks to install. For them, turn on **Record** (on the Last
+turn tab, or its toolbar): while the walkthrough is open, it looks at their sessions in
+this repository every 3 seconds (`~/.pi/agent/sessions/`, `~/.codex/sessions/`, and
+opencode's database, read-only) and takes the same snapshots itself. A new prompt starts a
+turn; the turn ends once the agent's session and the working tree have both been still for
+a minute. Claude Code's sessions are left to its hooks, so with both in use no prompt is
+recorded twice, and of two walkthroughs open on one repository only one records.
+
+What it can't see: a prompt sent while no walkthrough is open, and the first seconds of a
+turn (its start snapshot, which is also the end of the turn before, is taken up to 3
+seconds after the prompt). Prompts that arrive
+together make one turn. A prompt sent while the agent is still working ends the turn before
+it as interrupted. Auto writes up a recorded turn once it ends.
+
 <details>
 <summary>How the hooks work</summary>
 
@@ -205,16 +226,19 @@ of the agent you opened it over, and a pane knows which turns are its tab's.
 ## Privacy and cost
 
 **Nothing is sent to a model until you press Generate**, except an agent's last turn while
-Auto is on (Haiku only, up to 300 hunks). Nothing is posted anywhere until you press
-**Post** and confirm.
+Auto is on (the backend's cheapest model only, up to 300 hunks). Nothing is posted
+anywhere until you press **Post** and confirm.
 
 - **Opening the walkthrough only reads git.** On the Pull request tab it also asks `gh` for
   the open pull requests and the picked one's diff. For local changes and branches it reads
-  what you typed into Claude Code in this repository since the last commit (from
-  `~/.claude/projects/`), to find the task. Tool output, subagents and commands are left out.
-- **A generation is one `claude -p` call** in the background, with no tools, MCP servers,
-  settings, hooks or skills: the model only reads the diff and the task, and answers. That
-  keeps a small change at about $0.002 with Haiku. Each walkthrough shows what it cost.
+  what you typed into Claude Code, pi, codex and opencode in this repository since the last
+  commit (from `~/.claude/projects/`, `~/.pi/agent/sessions/`, `~/.codex/sessions/` and
+  opencode's database), to find the task. Tool output, subagents and commands are left out.
+- **A generation is one `claude -p` (or `pi -p`) call** in the background, with no tools,
+  MCP servers, settings, hooks or skills: the model only reads the diff and the task, and
+  answers. That keeps a small change at about $0.002 with Haiku. Each walkthrough shows
+  what it cost. Claude Code answers in the walkthrough's JSON schema (`--json-schema`); pi
+  has no structured output, so the schema goes in its prompt and the answer is read from text.
 - **The task is treated as material, never as instructions,** and at most 6,000 characters
   of it are sent.
 - **A diff too large for the model** (about 175k tokens) is refused rather than cut: a
@@ -228,7 +252,9 @@ Auto is on (Haiku only, up to 300 hunks). Nothing is posted anywhere until you p
 | `entries/<key>.json` | Finished walkthroughs, the newest 200, each with the task it was matched against |
 | `pointers/<place>.json` | The one shown last per repository and tab |
 | `jobs/<place>/` | A generation in progress: its prompt, `run.sh`, and the answer |
-| `turns/<repo>/<turn>/` | The last 20 turns per repository, written by `hooks/turn.sh`: the hook's input, the snapshots' trees, the objects they needed |
+| `turns/<repo>/<turn>/` | The last 20 turns per repository, written by `hooks/turn.sh` or the recorder: the prompt, the snapshots' trees, the objects they needed |
+| `recorders/<repo>/` | Which open walkthrough records a repository's turns without hooks |
+| `failed/<job>/` | A failed generation's files, kept for a day to see why (the error names the folder) |
 | `read/<repo>.json` | The hunks you've read in a repository, by content, the newest 5,000 |
 | `clipboard.md` | The last walkthrough copied as Markdown |
 | `pr-comment.md` | The last walkthrough posted to a pull request |
@@ -287,22 +313,24 @@ If the mod was renamed when it was added (a name clash), replace the renamed fol
 ## Limits
 
 - **Local only.** A space on another machine shows a notice.
-- **Claude Code only, for now.** It must be logged in, and `claude --version` must work
-  from the PATH Herdr starts programs with. Codex is planned. Comments can already be sent
-  to a Codex agent, or any other.
+- **Claude Code or pi.** The one picked must be set up, and `claude --version` (or
+  `pi --version`) must work from the PATH Herdr starts programs with; pi is also looked for
+  under fnm's default alias. Comments can be sent to any agent.
 - **Big files.** New files over 1 MB, and new files past the first 300, are listed but not
   read. A page draws at most 2,500 lines of code; the rest is counted.
 - **Pull requests** need the [GitHub CLI](https://cli.github.com) (`gh`), logged in, and a
   GitHub remote. GitHub sends no diff past about 300 files or 20,000 lines; read such a
   change as a Branch instead. A pull request is read again when you pick it, not while
   it's open.
-- **The task** is found from Claude Code only. Prompts sent to other agents aren't, so
-  write them as your own task. For local changes it's every prompt in this repository
+- **The task** is found from Claude Code, pi, codex and opencode. Prompts sent to other
+  agents aren't, so write them as your own task. opencode's database layout isn't
+  documented: if it changes, you're told once that it couldn't be read. For local changes it's every prompt in this repository
   since the last commit, whichever session it went to; a commit made mid-task starts it
   over. Matching is the model's reading: "not in this diff" may mean it's done in a file the
   diff doesn't hold, or under another name.
-- **Last turn** records Claude Code's turns only, and writes walkthroughs without a click
-  only while the walkthrough is open.
+- **Last turn** records Claude Code's turns with its hooks, and pi's, codex's and
+  opencode's only while a walkthrough is open with recording on. It writes walkthroughs
+  without a click only while the walkthrough is open.
 - **Comments** are kept while the walkthrough is open, and sent with Enter.
 - **Read marks** are saved once a second: one made in the last second before Herdr quits
   can be lost. A step counts as changed since you read it when part of it was read, or when

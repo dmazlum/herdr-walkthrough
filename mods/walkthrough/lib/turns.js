@@ -1,5 +1,6 @@
-// An agent's turns, as hooks/turn.sh records them: what the working tree was
-// when a prompt was sent, and when the agent stopped. Plain functions over
+// An agent's turns, as hooks/turn.sh records them (or the walkthrough itself,
+// for an agent with no hooks: turnview.js): what the working tree was when a
+// prompt was sent, and when the agent stopped. Plain functions over
 // text; reading the folder is engine.js's.
 //
 // A turn's folder: start.json and end.json (the hook's input, as sent),
@@ -47,6 +48,7 @@ const lines = (text) => (text == null ? [] : String(text).split("\n").filter(Boo
  * startTree, endTree, frozen, startBig, endBig, session, terminal, prompt }.
  * A turn whose start snapshot isn't written yet (or failed) is left out.
  * `frozen`: the end was taken by the walkthrough, not by a Stop hook.
+ * `recorded`: the walkthrough recorded the whole turn (no hooks).
  */
 export function parseListing(out, folder) {
   const turns = [];
@@ -69,6 +71,7 @@ export function parseListing(out, folder) {
       startTree: start.tree, endTree: SHA.test(end.tree ?? "") ? end.tree : null, frozen: end.interrupted === "1",
       startBig: lines(files["start.big"]), endBig: lines(files["end.big"]),
       session: start.session || hook.session || null, terminal: start.terminal || null, prompt: hook.prompt,
+      recorded: start.recorder === "1",
     });
   }
   return sortTurns(turns);
@@ -188,3 +191,17 @@ export function hookSettings(script, { compact = false } = {}) {
   const hook = (event) => [{ hooks: [{ type: "command", command: command(event), timeout: HOOK_TIMEOUT }] }];
   return JSON.stringify({ hooks: { UserPromptSubmit: hook("start"), Stop: hook("stop") } }, null, 2);
 }
+
+/**
+ * The script engine.js runs to claim recording a repository's turns: $0 the
+ * lock folder, $1 this window. Prints "ok" while the claim is this window's.
+ * mkdir is atomic, so two windows can't both take a free lock; a claim not
+ * renewed for a minute (its window closed) is taken over.
+ */
+export const RECORDER_LOCK = `d="$0"
+if mkdir "$d" 2>/dev/null; then echo "$1" > "$d/owner"; echo ok; exit 0; fi
+if [ "$(cat "$d/owner" 2>/dev/null)" = "$1" ]; then touch "$d/owner"; echo ok; exit 0; fi
+[ -n "$(find "$d" "$d/owner" -maxdepth 0 -mmin -1 2>/dev/null)" ] && exit 0
+rm -rf "$d"
+mkdir "$d" 2>/dev/null && { echo "$1" > "$d/owner"; echo ok; }
+exit 0`;

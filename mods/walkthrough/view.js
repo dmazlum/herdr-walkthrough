@@ -18,16 +18,16 @@ import { TASK_MODES, taskChoice, resolveTask, taskKey, taskCacheKey, clip, MAX_T
 import { numberLines, hunkLabel, numberDigits } from "./lib/hunks.js";
 import { tokenize } from "./lib/highlight.js";
 import { LANGUAGES, languageOf, fromLocale } from "./lib/languages.js";
-import { MODELS, DEFAULT_MODEL, modelOf } from "./lib/job.js";
+import { BACKENDS, DEFAULT_BACKEND, backendOf, modelsOf, modelFor, modelOf } from "./lib/job.js";
 import { estimateTokens, codeKey, placeKey, MAX_PROMPT_CHARS } from "./lib/cache.js";
 import { formatComments, addComment, sameSpot } from "./lib/comments.js";
 import { toMarkdown, recapMarkdown } from "./lib/export.js";
 import { recapStrings } from "./lib/recap-language.js";
 import { readKey, hunkRead, isRead, markStep, unmarkStep, mergeRead, changedSince } from "./lib/read.js";
-import { readDiff, readPreferences, matters, keyFor, findShown, preparePrompt, fits, promptChars, jobOf, startJob, alive, finished, cancelJob, finishJob, copyText, postComment, claudeVersion, systemLocale, ensureDirs, loadRead, saveRead, transcriptMessages } from "./engine.js";
+import { readDiff, readPreferences, matters, keyFor, findShown, preparePrompt, fits, promptChars, jobOf, startJob, alive, finished, cancelJob, finishJob, copyText, postComment, backendVersion, systemLocale, ensureDirs, loadRead, saveRead, transcriptMessages } from "./engine.js";
 import { button, chip, menu, picker, logo, kbd, tag, eyebrow, upper, meter, callout, pageFrame, PAGE_PADDING, formatElapsed, formatTokens } from "./ui.js";
 import { turnSource, isOpen, firstLine } from "./lib/turns.js";
-import { AUTO, DEFAULT_AUTO, autoOf, startTurns, loadTurns, turnLabel, turnItems, chooseTurn, turnTick, autoGenerate, announce, hookHelp } from "./turnview.js";
+import { AUTO, DEFAULT_AUTO, autoOf, startTurns, loadTurns, turnLabel, turnItems, chooseTurn, turnTick, autoGenerate, announce, hookHelp, startRecorder, stopRecorder } from "./turnview.js";
 
 const PREFS = "walkthrough.prefs";
 // Lines drawn on one page; a step past this says how many it leaves out.
@@ -100,7 +100,9 @@ export class Walkthrough {
     this.tab = (p.pane && panes().find((x) => x.pane === p.pane)?.tab) || focused()?.tab || null; // a pane watches this tab's agents
     const saved = prefs();
     this.scope = SCOPES.some((s) => s.key === p.scope) ? p.scope : SCOPES.some((s) => s.key === saved.scope) ? saved.scope : "uncommitted";
-    this.model = MODELS.some((m) => m.key === saved.model) ? saved.model : DEFAULT_MODEL;
+    this.backend = BACKENDS.some((b) => b.key === saved.backend) ? saved.backend : DEFAULT_BACKEND;
+    // A model saved for another backend (or no longer offered) gives way to this backend's default, as the model picker shows.
+    this.model = modelFor(this.backend, saved.model);
     this.language = saved.language ?? null; // null until the system's is read
     this.repo = undefined; // undefined: looking, null: not in git
     this.base = null;
@@ -114,6 +116,8 @@ export class Walkthrough {
     this.turns = [];
     this.turnPinned = false;
     this.summaryOpen = false; // the sidebar's summary, shown whole
+    this.record = saved.recordTurns === true; // record the turns of agents with no hooks while open (turnview.js)
+    this.treeChangedAt = 0; // when the working tree last changed, for the recorder
     this.auto = AUTO.some((a) => a.key === saved.autoGenerate) ? saved.autoGenerate : DEFAULT_AUTO;
     this.autoTried = new Set(); // turns already considered for a walkthrough without a click
     this.autoWanted = null;
@@ -121,7 +125,7 @@ export class Walkthrough {
     this.background = []; // walkthroughs written without a click, followed to their end: { job }
     this.confirmPost = false;
     this.posting = false;
-    this.claude = undefined;
+    this.cli = undefined; // the backend's version: undefined while looking, null when it can't be started
     this.diff = null;
     this.cacheKey = null;
     this.shown = null; // { entry, exact }
@@ -177,9 +181,9 @@ export class Walkthrough {
 
     cx.spawn(async (cx) => {
       if (!this.folder || this.remote) { this.repo = null; cx.notify(); return; }
-      const [repo, claude, locale] = await Promise.all([repoAt(exec, this.folder).catch(() => null), claudeVersion(), this.language ? null : systemLocale()]);
+      const [repo, cli, locale] = await Promise.all([repoAt(exec, this.folder).catch(() => null), backendVersion(this.backend), this.language ? null : systemLocale()]);
       this.repo = repo;
-      this.claude = claude;
+      this.cli = cli;
       if (!this.language) this.language = fromLocale(locale);
       if (!repo) { cx.notify(); return; }
       await ensureDirs();
@@ -193,6 +197,7 @@ export class Walkthrough {
       this.commit = commits[0] ?? null;
       if (this.scope === "pr") await this.loadPullRequests();
       await startTurns(this, cx);
+      startRecorder(this, cx);
       await this.reload(cx);
       this.watch(cx);
       await autoGenerate(this, cx, this.turn); // the turn the tab shows: this terminal's newest, else the newest
@@ -278,8 +283,8 @@ export class Walkthrough {
 
   /**
    * What people typed into agents in this repository since `since`: Claude
-   * Code's transcripts, else the turns the hooks recorded. A save re-reads the
-   * diff, so the transcripts are read at most every few seconds.
+   * Code's transcripts and pi, codex and opencode sessions, else the turns
+   * recorded. A save re-reads the diff, so the transcripts are read at most every few seconds.
    */
   async promptsSince(since) {
     const m = this.promptMemo;
@@ -374,7 +379,12 @@ export class Walkthrough {
       for (;;) {
         const changed = await watchFolder(folder);
         // A commit, a pull request or a finished turn doesn't change with the working tree.
-        if (this.scope !== "commit" && this.scope !== "pr" && !(this.scope === "turn" && !(this.turn && isOpen(this.turn))) && !this.dirty && await matters(top, changed, gitDir)) this.dirty = true;
+        const wanted = this.scope !== "commit" && this.scope !== "pr" && !(this.scope === "turn" && !(this.turn && isOpen(this.turn))) && !this.dirty;
+        // The recorder ends a turn once the working tree has been still a while, whatever is shown.
+        if ((wanted || this.record) && await matters(top, changed, gitDir)) {
+          this.treeChangedAt = Date.now();
+          if (wanted) this.dirty = true;
+        }
       }
     });
     loop(top);
@@ -408,7 +418,7 @@ export class Walkthrough {
           this.job.pid = job.pid;
           this.deadSince = null;
         } else if (!this.deadSince) {
-          // claude has just exited and run.sh is about to write its code: give it a moment.
+          // The run has just exited and run.sh is about to write its code: give it a moment.
           this.deadSince = Date.now();
         } else if (Date.now() - this.deadSince > 3000) {
           this.deadSince = null;
@@ -499,7 +509,7 @@ export class Walkthrough {
       const before = (this.shown?.entry.walkthrough.parts ?? []).flatMap((p) => p.steps.flatMap((st) => st.hunkIds));
       this.setJob(await startJob(repo, diff, { key, model, language, prompt, source, before, task }));
     } catch (err) {
-      this.genError = `Couldn't start claude: ${String(err?.message ?? err)}`;
+      this.genError = `Couldn't start ${backendOf(this.backend).program}: ${String(err?.message ?? err)}`;
     }
   }
 
@@ -733,6 +743,20 @@ export class Walkthrough {
     this.picking = null;
     if (kind === "task") { this.chooseTask(value, cx); return; }
     if (kind === "auto") { this.auto = value; savePrefs({ autoGenerate: value }); cx.notify(); return; }
+    if (kind === "record") {
+      this.record = value;
+      savePrefs({ recordTurns: value });
+      if (!value) cx.spawn(async () => stopRecorder(this));
+      cx.notify();
+      return;
+    }
+    if (kind === "backend") {
+      this.backend = value;
+      this.model = modelFor(value, this.model);
+      this.cli = undefined;
+      savePrefs({ backend: value, model: this.model });
+      cx.spawn(async (cx) => { this.cli = await backendVersion(value); cx.notify(); });
+    }
     if (kind !== "agent") { this.genError = null; this.loading = true; }
     if (kind === "model") { this.model = value; savePrefs({ model: value }); }
     if (kind === "language") { this.language = value; savePrefs({ language: value }); }
@@ -891,7 +915,7 @@ export class Walkthrough {
     const action = busy
       ? button(t, "cancel", "Cancel", (_e, cx) => cx.spawn(async (cx) => this.cancel(cx)), { small: true })
       : button(t, "generate", this.shown?.exact ? "Regenerate" : "✦ Generate", (_e, cx) => cx.spawn(async (cx) => this.generate(cx)),
-        { kind: this.shown?.exact ? "outline" : "solid", small: true, disabled: !this.canGenerate(), tooltip: this.claude === null ? "claude isn't installed" : null });
+        { kind: this.shown?.exact ? "outline" : "solid", small: true, disabled: !this.canGenerate(), tooltip: this.cli === null ? `${backendOf(this.backend).program} isn't installed` : null });
     return h_flex().h(48).flex_none().px(14).gap(10).items_center().border_b(1).border_color(t.border)
       .child(logo(t))
       .child(div().flex_none().font_semibold().text_size(14).child("Walkthrough"))
@@ -948,11 +972,19 @@ export class Walkthrough {
         .child(button(t, "toggle-auto", auto ? "⚡ Auto" : "Auto: off", (_e, cx) => { this.choose("auto", auto ? "off" : DEFAULT_AUTO, cx); }, {
           kind: auto ? "soft" : "ghost", small: true,
           tooltip: auto ? `${autoOf(this.auto).about}. Click to turn it off.` : "Only when you press Generate. Click to write the last turn's walkthrough without a click.",
+        }))
+        .child(button(t, "toggle-record", this.record ? "● Recording" : "Record: off", (_e, cx) => this.choose("record", !this.record, cx), {
+          kind: this.record ? "soft" : "ghost", small: true,
+          tooltip: this.record
+            ? "Recording the turns of pi, codex and opencode in this repository while the walkthrough is open (Claude Code's are left to its hooks). Click to stop."
+            : "For agents with no hooks (pi, codex, opencode): record their turns while the walkthrough is open. Click to start.",
         })));
     const how = h_flex().flex_none().gap(8).items_center().flex_wrap()
       .when(Boolean(this.diff), (el) => el.child(picker(t, "pick-task", this.taskFace(), open("task"),
         { tooltip: this.task ? `Matched against ${this.task.label.charAt(0).toLowerCase()}${this.task.label.slice(1)}` : "What the change is matched against", kind: this.task ? "soft" : "outline" })))
       .child(h_flex().flex_none().items_center().rounded(8).border_1().border_color(t.border)
+        .child(picker(t, "pick-backend", backendOf(this.backend).name, open("backend"), { tooltip: "Who writes the walkthrough", kind: "ghost" }))
+        .child(div().w(1).h(14).bg(t.border))
         .child(picker(t, "pick-model", modelOf(this.model).name, open("model"), { tooltip: "Model", kind: "ghost" }))
         .child(div().w(1).h(14).bg(t.border))
         .child(picker(t, "pick-language", languageOf(this.language).name, open("language"), { tooltip: "Language of the explanations", kind: "ghost" })));
@@ -962,7 +994,7 @@ export class Walkthrough {
   }
 
   canGenerate() {
-    return Boolean(this.claude && this.repo && this.diff && this.diff.hunkCount > 0 && !this.job && !this.loading);
+    return Boolean(this.cli && this.repo && this.diff && this.diff.hunkCount > 0 && !this.job && !this.loading);
   }
 
   /** The open picker's rows and where it sits: { items, width, side }. */
@@ -982,7 +1014,8 @@ export class Walkthrough {
         };
         return { side: "right", width: 360, items: TASK_MODES.map((m) => ({ label: m.key === "own" ? "Your own…" : m.name, hint: hint(m), value: m.key, selected: m.key === choice.mode })) };
       }
-      case "model": return { side: "right", width: 280, items: MODELS.map((m) => ({ label: m.name, hint: m.about, value: m.key, selected: m.key === this.model })) };
+      case "backend": return { side: "right", width: 300, items: BACKENDS.map((b) => ({ label: b.name, hint: b.about, value: b.key, selected: b.key === this.backend })) };
+      case "model": return { side: "right", width: 280, items: modelsOf(this.backend).map((m) => ({ label: m.name, hint: m.about, value: m.key, selected: m.key === this.model })) };
       case "language": return { side: "right", width: 220, items: LANGUAGES.map((l) => ({ label: l.name, right: l.english === l.name ? "" : l.english, value: l.tag, selected: l.tag === this.language })) };
       case "agent": {
         const current = this.agent();
@@ -1037,7 +1070,7 @@ export class Walkthrough {
       .when(Boolean(text), (e) => e.child(div().max_w(560).text_center().text_size(12.5).line_height(1.5).text_color(t.dim).child(text)))
       .when(actions.length > 0, (e) => e.child(h_flex().mt(8).gap(8).items_center().children(actions)));
     const goTo = (key, label) => button(t, `go-${key}`, label, (_e, cx) => this.pickScope(key, cx), { kind: "ghost", small: true });
-    if (this.remote) return center("This space is on another machine", "Walkthroughs read git and run claude on this computer only.", { icon: "⇄" });
+    if (this.remote) return center("This space is on another machine", "Walkthroughs read git and run the model on this computer only.", { icon: "⇄" });
     if (this.repo === undefined) return center("Reading…");
     if (this.repo === null) return center("Not a git repository", this.folder ? `Nothing to walk through in ${this.folder}.` : "Focus a terminal in a repository, then open the walkthrough again.", { icon: "⎇" });
     if (this.error) return center("Couldn't read the diff", this.error, { icon: "!", color: t.ansi1 });
@@ -1139,7 +1172,7 @@ export class Walkthrough {
     return v_flex().id("intro").size_full().overflow_y_scrollbar().items_center().p(28).gap(14)
       .child(v_flex().w_full().max_w(620).gap(14)
         .child(div().text_size(24).line_height(1.25).font_semibold().child("Read this change in the order it makes sense"))
-        .child(div().text_size(13.5).line_height(1.6).text_color(t.muted).child("Claude groups related edits into steps, orders them so each builds on the last, and explains what each one changes. It explains; it doesn't judge the code. Every edit it leaves out is still listed at the end."))
+        .child(div().text_size(13.5).line_height(1.6).text_color(t.muted).child(`${backendOf(this.backend).writer} groups related edits into steps, orders them so each builds on the last, and explains what each one changes. It explains; it doesn't judge the code. Every edit it leaves out is still listed at the end.`))
         .child(h_flex().gap(8).items_center().flex_wrap()
           .child(chip(t, `${d.fileCount} file${d.fileCount === 1 ? "" : "s"}`))
           .child(chip(t, `${d.hunkCount} hunk${d.hunkCount === 1 ? "" : "s"}`))
@@ -1147,7 +1180,7 @@ export class Walkthrough {
           .when(d.generatedPaths.length > 0, (e) => e.child(chip(t, `${d.generatedPaths.length} generated, not sent`)))
           .when(d.unread.length > 0, (e) => e.child(chip(t, `${d.unread.length} not read`)))
           .when(Boolean(this.task), (e) => e.child(chip(t, `Task: ${this.task.short}`, t.accent).tooltip(`${this.task.label}: each request in it is matched to the steps that carry it out. The task menu changes or turns it off.`))))
-        .when(this.claude === null, (e) => e.child(this.notice(t, t.ansi1, "Claude Code's `claude` isn't installed, or isn't on the PATH Herdr starts programs with. Walkthroughs are written by `claude -p`.")))
+        .when(this.cli === null, (e) => e.child(this.notice(t, t.ansi1, `${backendOf(this.backend).name}'s \`${backendOf(this.backend).program}\` isn't installed, or isn't on the PATH Herdr starts programs with. Walkthroughs are written by \`${backendOf(this.backend).program} -p\`; the backend menu in the toolbar picks another.`)))
         .when(tooBig, (e) => e.child(this.notice(t, t.ansi1, "This diff is too large to send whole, and a walkthrough of part of it would read as complete. Pick a narrower scope.")))
         .when(d.hunkCount === 0 && d.files.length > 0, (e) => e.child(this.notice(t, t.muted, d.generatedPaths.length ? "Only generated files changed; they aren't sent to the model." : "No changed lines to read: binary files, renames or mode changes only.")))
         .when(Boolean(this.genError), (e) => e.child(this.notice(t, t.ansi1, this.genError)))
@@ -1181,7 +1214,7 @@ export class Walkthrough {
     return v_flex().size_full().items_center().justify_center().gap(12)
       .child(v_flex().gap(10)
         .child(row("done", "Read the diff", `${j.hunkCount} hunk${j.hunkCount === 1 ? "" : "s"}`))
-        .child(row(this.job.done ? "done" : "run", `Asking Claude ${modelOf(j.model).name}`, formatElapsed(Date.now() - j.started)))
+        .child(row(this.job.done ? "done" : "run", modelOf(j.model).backend === "pi" ? `Asking pi (${modelOf(j.model).name})` : `Asking Claude ${modelOf(j.model).name}`, formatElapsed(Date.now() - j.started)))
         .child(row(this.job.done ? "run" : "wait", "Putting the steps together")))
       .child(div().mt(8).max_w(480).text_center().text_size(11.5).text_color(t.dim).child("It runs in the background: close this and come back, the walkthrough will be waiting."))
       .child(button(t, "cancel-run", "Cancel", (_e, cx) => cx.spawn(async (cx) => this.cancel(cx)), { small: true }));

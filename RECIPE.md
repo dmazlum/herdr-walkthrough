@@ -1,7 +1,7 @@
 # Walkthrough
 
 A dialog (or pane) that turns the diff of the focused terminal's repository into a guided
-reading: Claude groups related hunks into steps, orders them so each builds on the last, and
+reading: a model (through Claude Code, or pi) groups related hunks into steps, orders them so each builds on the last, and
 explains what each step changes, with the step's code under the explanation. A contents
 column lists the steps; everything no step covers is listed at the end. It explains a
 change and never judges it.
@@ -347,7 +347,12 @@ A dialog 74% of the window wide and 80% tall (`modal`), on `theme().popover`; as
   anything is cut, so a sibling folder sharing the prefix can't crowd them out; without
   `tool_result`, `isSidechain`, `isMeta`; an image's base64 `data` emptied, never a line
   cut; at most 4 MB in all; then compaction summaries, non-human origins, commands and
-  their output dropped, each `uuid` once), read at most every 5 s; with none there, the recorded turns' prompts since
+  their output dropped, each `uuid` once); and the prompts typed into pi, codex and opencode
+  there (`lib/agents.js`: session files under `~/.pi/agent/sessions/` and
+  `~/.codex/sessions/` written since then, whose first line's `cwd` is the repository or
+  below it, read whole 4 at a time; opencode's database read-only by
+  `lib/opencode-prompts.py`, which prints `{"error"}` and exits 2 when its tables aren't
+  as expected, said once in a notification), read at most every 5 s; with none there, the recorded turns' prompts since
   then. Slash commands alone, "[Request interrupted …" and empty prompts are no task. At
   most 6,000 characters (2,000 per message; past that the first and the newest that fit).
   Your own: per repository and source in the prefs (`tasks`, the newest 100); the text is kept while Found or Off is picked. Off: none. A commit message git couldn't read is asked again on the next read.
@@ -443,14 +448,22 @@ A dialog 74% of the window wide and 80% tall (`modal`), on `theme().popover`; as
   HEAD)` plus untracked, commit `diff <first parent or empty tree> <hash>`. Base default:
   `origin/HEAD`, else origin/main, origin/master, main, master, trunk, develop.
 - The job: `~/.herdr/walkthrough/jobs/<place>/` with `system.txt`, `prompt.txt`,
-  `schema.json`, `meta.json` (key, model, language, alias → hunk id, deadline) and
-  `run.sh`, started with `exec("sh", ["-c", "nohup sh \"$0\" \"$1\" >/dev/null 2>&1 &",
-  run.sh, model, seconds])`. `run.sh` runs `claude -p --output-format json --tools '' 
-  --no-session-persistence --strict-mcp-config --setting-sources '' 
-  --disable-slash-commands --model $1 --json-schema "$(cat schema.json)" --system-prompt
-  "$(cat system.txt)" < prompt.txt > out.json 2> err.txt &`, writes `pid`, starts a watchdog that
-  kills claude after `seconds` (checking every 3 s and leaving with it), waits, writes
-  `code`. Starting a job over a folder whose run is still alive kills that run first. The answer is `structured_output`, else the JSON in `result`.
+  `schema.json`, `meta.json` (key, model, backend, language, alias → hunk id, deadline) and
+  `run.sh`, started with `exec("sh", ["-c", "nohup sh \"$0\" \"$1\" \"$2\" \"$3\" >/dev/null 2>&1 &",
+  run.sh, program, model, seconds])`. The backend (`lib/job.js`; a preference, Claude Code
+  by default) follows from the model, whose key is unique across backends. For Claude Code
+  `run.sh` runs `"$1" -p --output-format json --tools '' --no-session-persistence
+  --strict-mcp-config --setting-sources '' --disable-slash-commands --model $2
+  --json-schema "$(cat schema.json)" --system-prompt "$(cat system.txt)" < prompt.txt >
+  out.json 2> err.txt &`; for pi, `"$1" -p --mode json --no-tools --no-extensions --no-mcp
+  --no-skills --no-context-files --no-session [--model $2]` with the schema appended to
+  the system prompt (pi has no structured output). It writes `pid` and the run's
+  `ps -o lstart=` as `started` (pi rewrites its process title, so a pid is trusted only
+  while its start time matches), starts a watchdog beside it that kills the run after
+  `seconds` (checking every 3 s and leaving with it), waits, writes `code`. Starting a job
+  over a folder whose run is still alive kills that run first. Claude's answer is
+  `structured_output`, else the JSON in `result`; pi's is the JSON in the text of its last
+  `turn_end` event. A failed job's folder is moved to `failed/` for a day.
 - Storage: `entries/<key>.json` (key: hash of version, prompt version, repo, scope, model,
   language, `preferences.md` and the path, status and hunk ids of every file the model
   reads: generated and unread files don't count), `pointers/<hash(repo, scope)>.json`,
@@ -462,9 +475,16 @@ A dialog 74% of the window wide and 80% tall (`modal`), on `theme().popover`; as
   `appHome`, `focused`, `panes`, `spaces`, `agents`, `notify`, `shared`/`setShared`,
   `nextCommand`, `props`, `closeOverlay`, `theme`, `settings().font_family`, `checking`;
   and the host's `fetch` for the update check. Programs run:
-  `git`, `claude`, `sh`, `env`, `nohup`, `kill`, `mkdir`, `rm`, `ls`, `wc`, `defaults`,
+  `git`, `claude` or `pi`, `python3` (opencode's database), `sh`, `env`, `date`, `find`, `head`, `nohup`, `kill`, `mkdir`, `rm`, `ls`, `wc`, `defaults`,
   `stat`, `grep`, `cut`, `tail`.
-- `turnview.js` (the Last turn tab's state, Auto and the hook help), `lib/turns.js` (the
+- `turnview.js` (the Last turn tab's state, Auto, the recorder and the hook help),
+  `lib/recorder.js` (when a recorded turn starts and ends: a new prompt in a pi, codex or
+  opencode session of the repository starts one, polled every 3 s while recording is on;
+  several prompts seen at once share one turn; it ends once the sessions and the working
+  tree have both been still for 60 s, or at the next prompt, interrupted when that came
+  within 10 s of the last activity; Claude Code's sessions are left to its hooks; one
+  window per repository records, by a lock under `recorders/` renewed on every look and
+  taken over a minute after it lapses), `lib/turns.js` (the
   hook's JSON, `.meta` lines, the folder listing, where each turn ended, the settings
   snippet), `hooks/turn.sh`.
 

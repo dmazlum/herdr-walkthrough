@@ -9,7 +9,7 @@ import { normalize, parseJson, overlay, fileTotals, LIMITS, SCHEMA } from "../mo
 import { fromLocale, languageOf } from "../mods/walkthrough/lib/languages.js";
 import { cacheKey, codeKey, deadline, placeKey } from "../mods/walkthrough/lib/cache.js";
 import { worthReading } from "../mods/walkthrough/lib/sources.js";
-import { readOutcome, jobScript, isRunCommand } from "../mods/walkthrough/lib/job.js";
+import { readOutcome, jobScript, isRunCommand, backendOf, modelsOf, modelOf, modelFor, MODELS, AUTO_MODEL, DEFAULT_BACKEND } from "../mods/walkthrough/lib/job.js";
 import { formatComments, addComment, sameSpot } from "../mods/walkthrough/lib/comments.js";
 
 const PATCH = `diff --git a/src/a.js b/src/a.js
@@ -298,28 +298,69 @@ test("cache keys change with the code, model and language", () => {
   assert.equal(deadline(10_000), 900_000);
 });
 
-test("readOutcome reads structured output, text answers and failures", () => {
+test("readOutcome reads Claude's structured output, text answers and failures", () => {
   assert.deepEqual(readOutcome({ out: JSON.stringify({ subtype: "success", structured_output: { a: 1 }, total_cost_usd: 0.01 }) }), { raw: { a: 1 }, cost: 0.01 });
-  assert.deepEqual(readOutcome({ out: JSON.stringify({ subtype: "success", result: "```json\n{\"a\":2}\n```" }) }).raw, { a: 2 });
+  assert.deepEqual(readOutcome({ backend: "claude", out: JSON.stringify({ subtype: "success", result: "```json\n{\"a\":2}\n```" }) }).raw, { a: 2 });
   assert.throws(() => readOutcome({ out: JSON.stringify({ is_error: true, result: "Not logged in · Please run /login" }) }), (e) => e.code === "login");
   assert.throws(() => readOutcome({ out: "", err: "boom\nlast line", code: "1\n" }), /boom last line/);
-  assert.throws(() => readOutcome({ out: null, err: "", code: "127" }), /exited with 127/);
+  assert.throws(() => readOutcome({ out: null, err: "", code: "127" }), /claude exited with 127/);
+});
+
+test("readOutcome reads the last pi turn, text answers and failures", () => {
+  const turn = (text, cost) => JSON.stringify({ type: "turn_end", message: { content: [{ type: "text", text }], usage: { cost: { total: cost } } } });
+  assert.deepEqual(readOutcome({ backend: "pi", out: `${turn("{\"a\":0}", 0.5)}\n${turn("{\"a\":1}", 0.01)}` }), { raw: { a: 1 }, cost: 0.01 });
+  assert.deepEqual(readOutcome({ backend: "pi", out: turn("```json\n{\"a\":2}\n```", null) }).raw, { a: 2 });
+  assert.throws(() => readOutcome({ backend: "pi", out: "{\"type\":\"error\",\"message\":\"Not logged in · run pi auth\"}" }), (e) => e.code === "login");
+  assert.throws(() => readOutcome({ backend: "pi", out: turn("I can't do that.", 0) }), /I can't do that/);
+  assert.throws(() => readOutcome({ backend: "pi", out: "", err: "boom\nlast line", code: "1\n" }), /boom last line/);
+  assert.throws(() => readOutcome({ backend: "pi", out: null, err: "", code: "127" }), /pi exited with 127/);
+});
+
+test("each backend has its own models, Claude by default, and a saved model never switches backend", () => {
+  assert.equal(DEFAULT_BACKEND, "claude");
+  assert.equal(backendOf("nope").key, "claude");
+  assert.deepEqual(modelsOf("claude").map((m) => m.key), ["haiku", "sonnet", "opus"]);
+  assert.ok(modelsOf("pi").every((m) => modelOf(m.key).backend === "pi"));
+  assert.equal(modelOf("haiku").backend, "claude");
+  assert.equal(modelOf("pi-default").model, "");
+  assert.equal(modelFor("claude", "haiku"), "haiku");
+  assert.equal(modelFor("claude", "deepseek/deepseek-flash"), "haiku");
+  assert.equal(modelFor("pi", "haiku"), "pi-default");
+  assert.equal(modelFor("pi", "deepseek/deepseek-flash"), "deepseek/deepseek-flash");
+  for (const b of ["claude", "pi"]) assert.equal(modelOf(AUTO_MODEL[b]).backend, b);
+  // Keys name one model only: a cache key holding one names its backend too.
+  const keys = Object.values(MODELS).flat().map((m) => m.key);
+  assert.equal(new Set(keys).size, keys.length);
 });
 
 test("only a walkthrough run's command line is taken for one", () => {
   assert.ok(isRunCommand("claude -p --model haiku --tools  --no-session-persistence --strict-mcp-config --setting-sources  --disable-slash-commands --json-schema {}"));
   assert.ok(isRunCommand("node /x/cli.js -p --no-session-persistence --strict-mcp-config --disable-slash-commands --json-schema {}"));
+  assert.ok(isRunCommand("pi -p --mode json --no-tools --no-extensions --no-mcp --no-skills --no-context-files --no-session"));
   assert.ok(!isRunCommand("/Applications/Zed.app/Contents/MacOS/zed"));
   assert.ok(!isRunCommand("claude --resume"));
+  assert.ok(!isRunCommand("pi --mode json"));
   assert.ok(!isRunCommand(""));
 });
 
-test("the job script passes no tools and quotes empty flags", () => {
-  const s = jobScript();
-  assert.match(s, /'--tools' '' /);
-  assert.match(s, /'--setting-sources' '' /);
-  assert.match(s, /--model "\$1"/);
-  assert.match(s, /mv code\.tmp code/);
+test("the job script passes no tools, keeps --json-schema for Claude, and records the run's start", () => {
+  const claude = jobScript("claude");
+  assert.equal(claude, jobScript());
+  assert.match(claude, /'--tools' '' /);
+  assert.match(claude, /'--setting-sources' '' /);
+  assert.match(claude, /--json-schema "\$\(cat schema\.json\)"/);
+  assert.match(claude, /^"\$1" /m);
+  const pi = jobScript("pi");
+  assert.match(pi, /'--mode' 'json'/);
+  assert.match(pi, /'--no-tools'/);
+  assert.doesNotMatch(pi, /--json-schema/);
+  for (const s of [claude, pi]) {
+    assert.match(s, /\$\{2:\+--model "\$2"\}/);
+    assert.match(s, /ps -o lstart= -p "\$pid"/);
+    // The watchdog runs beside the run, so the code is written as soon as it exits.
+    assert.match(s, /\( waited=0/);
+    assert.match(s, /mv code\.tmp code/);
+  }
 });
 
 test("worthReading drops node_modules and git internals, but not the index", () => {

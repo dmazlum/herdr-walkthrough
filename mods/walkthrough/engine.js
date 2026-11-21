@@ -4,11 +4,13 @@
 //   entries/<key>.json     a finished walkthrough, named by everything that decides it
 //   pointers/<place>.json  the one shown last for a repository and source
 //   jobs/<place>/          a generation in progress (run.sh, prompt, answer)
-//   turns/<repo>/<turn>/   an agent's turn, written by hooks/turn.sh (see lib/turns.js)
+//   turns/<repo>/<turn>/   an agent's turn, written by hooks/turn.sh or the recorder (see lib/turns.js)
+//   recorders/<repo>/      which open walkthrough records a repository's turns without hooks
+//   failed/<job>/          a failed generation's files, kept for a day to see why
 //   read/<repo>.json       the hunks read in a repository, by content
 //   preferences.md         optional: the reader's own wishes, added to every prompt
 
-import { exec, home, appHome, readTextFile, writeTextFile } from "herdr";
+import { exec, home, appHome, readTextFile, writeTextFile, notify } from "herdr";
 import { loadSections, sourceKey, describe, git, worthReading, ghError, turnsKey, snapshotTree } from "./lib/sources.js";
 import { buildDigest } from "./lib/digest.js";
 import { buildPrompt } from "./lib/prompt.js";
@@ -16,9 +18,10 @@ import { schemaFor, normalize, VERSION } from "./lib/walkthrough.js";
 import { cacheKey, codeKey, placeKey, deadline, MAX_PROMPT_CHARS } from "./lib/cache.js";
 import { longHash } from "./lib/hash.js";
 import { mergeRead } from "./lib/read.js";
-import { jobScript, readOutcome, isRunCommand } from "./lib/job.js";
-import { parseListing, resolveEnds, LISTING } from "./lib/turns.js";
+import { jobScript, readOutcome, isRunCommand, backendOf, modelOf } from "./lib/job.js";
+import { parseListing, resolveEnds, LISTING, RECORDER_LOCK } from "./lib/turns.js";
 import { taskKey, taskCacheKey, parseTranscript, projectSlug, jsonPath, TRANSCRIPTS } from "./lib/task.js";
+import { parseSessionHeads, parsePiSession, parseCodexSession, parseOpencode, mergePrompts, inRepo, SESSION_HEADS } from "./lib/agents.js";
 
 const MAX_ENTRIES = 200;
 export const dataDir = () => `${home()}/.herdr/walkthrough`;
@@ -26,6 +29,13 @@ const entryPath = (key) => `${dataDir()}/entries/${key}.json`;
 const pointerPath = (place) => `${dataDir()}/pointers/${place}.json`;
 const jobDir = (place) => `${dataDir()}/jobs/${place}`;
 const readPath = (top) => `${dataDir()}/read/${longHash(top)}.json`;
+
+/** A file of several MB (a job's out.json, a session): readTextFile falls short on those, so cat first. */
+async function readBig(path) {
+  const r = await exec("cat", [path]).catch(() => null);
+  if (r?.code === 0 && r.stdout !== "") return r.stdout;
+  return readTextFile(path).catch(() => null);
+}
 
 async function readJson(path) {
   try {
@@ -77,10 +87,17 @@ export async function postComment(top, number, text) {
   return (r.stdout ?? "").trim().split("\n").pop() ?? "";
 }
 
-/** Whether Claude Code's `claude` can be started: its version, or null. */
-export async function claudeVersion() {
+/** The program a backend's runs start: pi through the PATH Herdr sees, else fnm's default alias. */
+export async function programOf(backend) {
+  if (backendOf(backend).key !== "pi") return "claude";
+  const r = await exec("sh", ["-c", 'command -v pi 2>/dev/null || printf %s "$HOME/.local/share/fnm/aliases/default/bin/pi"']).catch(() => null);
+  return (r?.stdout ?? "").trim().split("\n")[0] || "pi";
+}
+
+/** Whether a backend's program can be started: its version, or null. */
+export async function backendVersion(backend) {
   try {
-    const r = await exec("claude", ["--version"]);
+    const r = await exec(await programOf(backend), ["--version"]);
     return r.code === 0 ? r.stdout.trim() : null;
   } catch { return null; }
 }
@@ -100,17 +117,67 @@ export async function readDiff(repo, source) {
 export const keyFor = (repo, diff, model, language, preferences = "", task = null) =>
   cacheKey({ top: repo.top, source: diff.sk, model, language, preferences, files: diff.files, task: taskCacheKey(task) });
 
+// Sessions read at once: enough to overlap the waits, few enough not to flood a busy machine.
+const READ_AT_ONCE = 4;
+
+/** `fn` over `items`, at most `limit` at a time, in order. */
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const worker = async () => { while (next < items.length) { const i = next++; out[i] = await fn(items[i]); } };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
+
+// opencode's database is undocumented; a schema it no longer matches is said once, not silently read as no prompts.
+let opencodeWarned = false;
+
 /**
- * What people typed into Claude Code sessions working in a repository since
- * `since` (ms), oldest first: the task of a change made without the hooks
- * that record turns. Read from Claude Code's transcripts (its folder names
- * the project by its path; a session started in a subfolder counts too).
+ * The sessions of agents without hooks (pi, codex, opencode) working in a
+ * repository: what was typed into them since `since` (ms), oldest first, and
+ * when any of them last wrote (`active`, ms; 0 when none did). Only session
+ * files written since `since` are opened, and only those whose first line puts
+ * them in this repository are read whole.
+ * @returns {Promise<{ prompts: { at: number, text: string, session: string|null, agent: string }[], active: number }>}
+ */
+export async function agentSessions(top, since) {
+  const minutes = String(Math.min(43_200, Math.max(1, Math.ceil((Date.now() - since) / 60_000) + 1)));
+  const roots = { pi: `${home()}/.pi/agent/sessions`, codex: `${home()}/.codex/sessions` };
+  const script = `${appHome()}/mods/walkthrough/lib/opencode-prompts.py`;
+  const [heads, oc] = await Promise.all([
+    exec("sh", ["-c", SESSION_HEADS, minutes, roots.pi, roots.codex]).catch(() => null),
+    exec("python3", [script, top, String(Math.floor(since))]).catch(() => null),
+  ]);
+  const mine = parseSessionHeads(heads?.stdout ?? "").filter((h) => inRepo(h.cwd, top))
+    .map((h) => ({ ...h, agent: h.path.startsWith(`${roots.pi}/`) ? "pi" : "codex" }));
+  const read = await mapLimit(mine, READ_AT_ONCE, async (h) => {
+    const text = (await readBig(h.path)) ?? "";
+    return h.agent === "pi" ? parsePiSession(text, { top, since, session: `pi:${h.path}` }) : parseCodexSession(text, { top, since, session: `codex:${h.path}` });
+  });
+  const opencode = parseOpencode(oc?.stdout ?? "", since);
+  if (opencode.error && !opencodeWarned) {
+    opencodeWarned = true;
+    notify({ title: "Walkthrough", body: `Couldn't read opencode's sessions (its database may have changed): ${opencode.error}`, level: "warning" });
+  }
+  const active = Math.max(0, opencode.active, ...mine.map((h) => h.mtime));
+  return { prompts: mergePrompts([...read, opencode.prompts]), active };
+}
+
+/**
+ * What people typed into the agents working in a repository since `since`
+ * (ms), oldest first: the task of a change made without the hooks that record
+ * turns. Read from Claude Code's transcripts (its folder names the project by
+ * its path; a session started in a subfolder counts too), and from pi, codex
+ * and opencode sessions.
  */
 export async function transcriptMessages(top, since) {
   // Claude Code shortens very long folder names; the prefix finds them, and each line's cwd decides.
   const prefix = projectSlug(top).slice(0, 120);
-  const r = await exec("sh", ["-c", TRANSCRIPTS, prefix, String(Math.floor(since / 1000)), jsonPath(top)]).catch(() => null);
-  return parseTranscript(r?.stdout ?? "", { top, since });
+  const [claude, others] = await Promise.all([
+    exec("sh", ["-c", TRANSCRIPTS, prefix, String(Math.floor(since / 1000)), jsonPath(top)]).catch(() => null),
+    agentSessions(top, since).catch(() => ({ prompts: [] })),
+  ]);
+  return mergePrompts([parseTranscript(claude?.stdout ?? "", { top, since }), others.prompts]);
 }
 
 /** The reader's own wishes for every walkthrough, or "". */
@@ -185,6 +252,52 @@ export async function turnsFolder(top) {
   return dir;
 }
 
+/**
+ * A turn recorded by the walkthrough itself, for an agent with no hooks: the
+ * working tree when its prompt was seen, in the format hooks/turn.sh writes
+ * (id `<startedSeconds>-<random>`; `recorder=1` in start.meta tells it apart).
+ */
+export async function startTurn(folder, top, { prompt, session = null, started = Date.now() } = {}) {
+  if (!folder) return null;
+  const id = `${Math.floor(started / 1000)}-${Math.floor(Math.random() * 90000 + 10000)}`;
+  const dir = `${folder}/${id}`;
+  await exec("mkdir", ["-p", `${dir}/objects`]).catch(() => undefined);
+  let snap;
+  try { snap = await snapshotTree(exec, top, { index: `${dir}/index`, objects: `${dir}/objects` }); }
+  catch { await exec("rm", ["-rf", dir]).catch(() => undefined); return null; }
+  await write(`${dir}/start.json`, JSON.stringify({ prompt, session_id: session, cwd: top, hook_event_name: "UserPromptSubmit" }));
+  await write(`${dir}/start.big`, snap.big.map((p) => `${p}\n`).join(""));
+  // Written last: a turn is listed once its start.meta names a tree.
+  await write(`${dir}/start.meta`, `tree=${snap.tree}\nstarted=${Math.floor(started / 1000)}\nsession=${session ?? ""}\nrecorder=1\n`);
+  return { id, dir, started, session };
+}
+
+/**
+ * Ends a turn the recorder started: the working tree now. `interrupted`: its
+ * end wasn't seen (the next prompt came while it worked, or the walkthrough
+ * was closed in the middle), as closeTurn marks one.
+ */
+export async function endTurn(top, turn, { interrupted = false } = {}) {
+  if (!turn?.dir) return;
+  const { tree, big } = await snapshotTree(exec, top, { index: `${turn.dir}/now.index`, objects: `${turn.dir}/objects` });
+  await write(`${turn.dir}/end.big`, big.map((p) => `${p}\n`).join(""));
+  await write(`${turn.dir}/end.meta`, `tree=${tree}\nended=${Math.floor(Date.now() / 1000)}\n${interrupted ? "interrupted=1\n" : ""}`);
+}
+
+/**
+ * Whether this window (`owner`) records a repository's turns: one walkthrough
+ * per repository does, so two open on it don't record each prompt twice. The
+ * claim is renewed on every look and lapses a minute after its window stops
+ * renewing it (closed, or gone with Herdr).
+ */
+export async function claimRecorder(folder, owner) {
+  if (!folder) return false;
+  const lock = `${dataDir()}/recorders/${longHash(folder)}`;
+  await exec("mkdir", ["-p", `${dataDir()}/recorders`]).catch(() => undefined);
+  const r = await exec("sh", ["-c", RECORDER_LOCK, lock, owner]).catch(() => null);
+  return (r?.stdout ?? "").trim() === "ok";
+}
+
 /** A repository's turns, newest first, each with where it ended (lib/turns.js; `ends`: resolveEnds' options). */
 export async function listTurns(folder, ends = {}) {
   if (!folder) return [];
@@ -248,6 +361,8 @@ export async function jobOf(repo, sk) {
 
 /** Starts a generation in the background and returns its job. */
 export async function startJob(repo, diff, { key, model, language, prompt, source, auto = false, before = [], task = null }) {
+  // The model decides the backend: its key is unique across them (lib/job.js).
+  const { backend, model: runModel } = modelOf(model);
   await ensureDirs();
   const dir = jobDir(placeKey(repo.top, diff.sk));
   // A run still going there (another window started it) is stopped, not orphaned.
@@ -255,20 +370,24 @@ export async function startJob(repo, diff, { key, model, language, prompt, sourc
   await exec("rm", ["-rf", dir]);
   await exec("mkdir", ["-p", dir]);
   const meta = {
-    key, code: codeKey(diff.files), model, language, top: repo.top, source, sk: diff.sk, started: Date.now(), deadline: Date.now() + deadline(diff.hunkCount),
+    key, code: codeKey(diff.files), model, backend, language, top: repo.top, source, sk: diff.sk, started: Date.now(), deadline: Date.now() + deadline(diff.hunkCount),
     idByAlias: diff.idByAlias, digestFiles: [...diff.digestFiles, ...unseenFiles(diff).map(({ path }) => ({ path, aliases: [] }))], hunkCount: diff.hunkCount, auto, before,
     // Kept with the walkthrough: where its task came from, and the key that tells when the task has changed since.
     task: task ? { from: task.from, label: task.label, short: task.short, text: task.text, context: task.context ?? "", key: taskKey(task) } : null,
   };
-  await writeTextFile(`${dir}/system.txt`, prompt.system, null);
+  const schema = schemaFor(Boolean(task));
+  // Claude Code holds the answer to the schema (--json-schema). pi can't, so the schema goes in its
+  // system prompt and the answer is parsed from text.
+  const system = backend === "pi" ? `${prompt.system}\n\nAnswer with ONE JSON object that matches this JSON Schema exactly, and nothing else:\n${JSON.stringify(schema)}` : prompt.system;
+  await writeTextFile(`${dir}/system.txt`, system, null);
   await writeTextFile(`${dir}/prompt.txt`, prompt.prompt, null);
-  await writeTextFile(`${dir}/schema.json`, JSON.stringify(schemaFor(Boolean(task))), null);
-  await writeTextFile(`${dir}/run.sh`, jobScript(), null);
+  await writeTextFile(`${dir}/schema.json`, JSON.stringify(schema), null);
+  await writeTextFile(`${dir}/run.sh`, jobScript(backend), null);
   await writeTextFile(`${dir}/meta.json`, JSON.stringify(meta), null);
   // Detached: exec returns at once, and the run outlives this window.
-  // run.sh stops claude itself at the deadline, so a hung run ends even with no window open.
+  // run.sh stops the run itself at the deadline, so a hung run ends even with no window open.
   const seconds = String(Math.ceil((meta.deadline - meta.started) / 1000));
-  const launched = await exec("sh", ["-c", "nohup sh \"$0\" \"$1\" \"$2\" >/dev/null 2>&1 &", `${dir}/run.sh`, model, seconds]);
+  const launched = await exec("sh", ["-c", "nohup sh \"$0\" \"$1\" \"$2\" \"$3\" >/dev/null 2>&1 &", `${dir}/run.sh`, await programOf(backend), runModel, seconds]);
   if (launched.code !== 0) {
     await exec("rm", ["-rf", dir]);
     throw new Error((launched.stderr || launched.stdout || `sh exited with ${launched.code}`).trim());
@@ -277,13 +396,19 @@ export async function startJob(repo, diff, { key, model, language, prompt, sourc
 }
 
 /**
- * The pid a job folder recorded, only while it is still that folder's claude
- * run. After a reboot the number can belong to anything; it is never signalled
+ * The pid a job folder recorded, only while it is still that folder's run. After a reboot the number can belong to anything; it is never signalled
  * on the strength of the file alone.
  */
 async function runPid(dir, known = null) {
   const pid = known ?? (await readTextFile(`${dir}/pid`).catch(() => null))?.trim();
   if (!pid || !/^\d+$/.test(pid)) return null;
+  // pi rewrites its process title (ps shows only "pi"): the start time run.sh
+  // recorded tells whether the number is still that process.
+  const started = (await readTextFile(`${dir}/started`).catch(() => null))?.trim();
+  const ps = await exec("ps", ["-o", "lstart=", "-p", pid]).catch(() => null);
+  const now = ps?.code === 0 ? String(ps.stdout ?? "").trim() : "";
+  if (!now) return null;
+  if (started) return now.replace(/\s+/g, " ") === started.replace(/\s+/g, " ") ? pid : null;
   const r = await exec("ps", ["-o", "command=", "-p", pid]).catch(() => null);
   return r?.code === 0 && isRunCommand(r.stdout) ? pid : null;
 }
@@ -294,13 +419,15 @@ async function stopRun(dir) {
 }
 
 /**
- * Whether a job's claude is still running (a reboot leaves a job with no
+ * Whether a job's run is still going (a reboot leaves a job with no
  * answer and no process). The pid is read once and kept on the job.
  */
 export async function alive(job) {
   job.pid ??= (await readTextFile(`${job.dir}/pid`).catch(() => null))?.trim() || null;
   if (!job.pid) return Date.now() - job.meta.started < 10_000; // not started yet
-  return (await runPid(job.dir, job.pid)) !== null;
+  if (await runPid(job.dir, job.pid)) return true;
+  // run.sh writes pid, then started, just after the launch: a run isn't given up in between.
+  return Date.now() - job.meta.started < 15_000;
 }
 
 /** The cheap look taken every second: the job, finished, once its code is there; else null. */
@@ -314,6 +441,19 @@ export async function cancelJob(job) {
   await exec("rm", ["-rf", job.dir]);
 }
 
+/** A failed job's files (out, err, code, meta) are kept for a day, to see why; older ones go. */
+const FAILED_TTL_MIN = 24 * 60;
+async function keepFailedJob(place, claimed) {
+  const rootFailed = `${dataDir()}/failed`;
+  await exec("mkdir", ["-p", rootFailed]).catch(() => undefined);
+  const name = `${place}-${Date.now().toString(36)}`;
+  const to = `${rootFailed}/${name}`;
+  const moved = await exec("mv", [claimed, to]).catch(() => ({ code: 1 }));
+  if (moved.code !== 0) { await exec("rm", ["-rf", claimed]).catch(() => undefined); return null; }
+  await exec("sh", ["-c", `cd "$0" && find . -mindepth 1 -maxdepth 1 -mmin +${FAILED_TTL_MIN} -exec rm -rf {} + 2>/dev/null`, rootFailed]).catch(() => undefined);
+  return `~/.herdr/walkthrough/failed/${name}`;
+}
+
 /**
  * A finished job → a stored walkthrough (and the pointer at it). The job's
  * folder goes either way; a failure is thrown with the reason. Two windows on
@@ -324,9 +464,9 @@ export async function finishJob(job) {
   const claimed = `${job.dir}.taken-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
   const moved = await exec("mv", [job.dir, claimed]).catch(() => ({ code: 1 }));
   if (moved.code !== 0) return null;
-  const read = (name) => readTextFile(`${claimed}/${name}`).catch(() => null);
+  const read = (name) => readBig(`${claimed}/${name}`);
   try {
-    const { raw, cost } = readOutcome({ out: await read("out.json"), err: await read("err.txt"), code: job.code });
+    const { raw, cost } = readOutcome({ backend: job.meta.backend, out: await read("out.json"), err: await read("err.txt"), code: job.code });
     const walkthrough = normalize(raw, job.meta.idByAlias, job.meta.digestFiles, { asks: Boolean(job.meta.task) });
     const { key, model, language, top, source, sk } = job.meta;
     // `before`: the hunks of the walkthrough shown when this one was asked for, to tell what changed since it was read.
@@ -335,9 +475,13 @@ export async function finishJob(job) {
     await write(entryPath(key), JSON.stringify(entry));
     await write(pointerPath(placeKey(top, sk)), JSON.stringify({ key, top, source: sk }));
     await evict();
-    return entry;
-  } finally {
     await exec("rm", ["-rf", claimed]);
+    return entry;
+  } catch (e) {
+    // A failure leaves the job's folder for a day, to see why.
+    const kept = await keepFailedJob(job.dir.split("/").pop(), claimed);
+    if (kept) e.message = `${e.message} · files in ${kept}`;
+    throw e;
   }
 }
 

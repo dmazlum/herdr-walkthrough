@@ -128,19 +128,39 @@ test("a branch against its base: committed and uncommitted work, not the base's"
   assert.deepEqual((await paths({ kind: "branch", base: "main" })).files, ["branch:a.txt:modified", "branch:f.txt:added", "branch:g.txt:added"]);
 });
 
-test("run.sh stops a claude that hangs, and the reason is the error", async () => {
+for (const backend of ["claude", "pi"]) {
+  test(`run.sh stops a ${backend} run that hangs, and the reason is the error`, async () => {
+    const job = mkdtempSync(join(tmpdir(), "walkthrough-job-"));
+    const bin = join(job, "bin");
+    mkdirSync(bin);
+    const program = join(bin, backend);
+    writeFileSync(program, "#!/bin/sh\nsleep 60\n");
+    chmodSync(program, 0o755);
+    for (const f of ["schema.json", "system.txt", "prompt.txt"]) writeFileSync(join(job, f), "{}");
+    writeFileSync(join(job, "run.sh"), jobScript(backend));
+    const started = Date.now();
+    await new Promise((resolve) => execFile("sh", [join(job, "run.sh"), program, backend === "pi" ? "" : "haiku", "1"], {}, resolve));
+    assert.ok(Date.now() - started < 20_000);
+    assert.ok(existsSync(join(job, "code")));
+    assert.ok(existsSync(join(job, "started")));
+    assert.throws(() => readOutcome({ backend, out: readFileSync(join(job, "out.json"), "utf8"), err: readFileSync(join(job, "err.txt"), "utf8"), code: readFileSync(join(job, "code"), "utf8") }), /Stopped after 1 seconds/);
+    rmSync(job, { recursive: true, force: true });
+  });
+}
+
+test("run.sh passes the model only when there is one", async () => {
   const job = mkdtempSync(join(tmpdir(), "walkthrough-job-"));
-  const bin = join(job, "bin");
-  mkdirSync(bin);
-  writeFileSync(join(bin, "claude"), "#!/bin/sh\nsleep 60\n");
-  chmodSync(join(bin, "claude"), 0o755);
+  const program = join(job, "pi");
+  writeFileSync(program, "#!/bin/sh\nfor a; do echo \"[$a]\" >> args.txt; done\n");
+  chmodSync(program, 0o755);
   for (const f of ["schema.json", "system.txt", "prompt.txt"]) writeFileSync(join(job, f), "{}");
-  writeFileSync(join(job, "run.sh"), jobScript());
-  const started = Date.now();
-  await new Promise((resolve) => execFile("sh", [join(job, "run.sh"), "haiku", "1"], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } }, resolve));
-  assert.ok(Date.now() - started < 20_000);
-  assert.ok(existsSync(join(job, "code")));
-  assert.throws(() => readOutcome({ out: readFileSync(join(job, "out.json"), "utf8"), err: readFileSync(join(job, "err.txt"), "utf8"), code: readFileSync(join(job, "code"), "utf8") }), /Stopped after 1 seconds/);
+  writeFileSync(join(job, "run.sh"), jobScript("pi"));
+  const run = (model) => new Promise((resolve) => execFile("sh", [join(job, "run.sh"), program, model, "30"], {}, resolve));
+  await run("");
+  assert.doesNotMatch(readFileSync(join(job, "args.txt"), "utf8"), /--model/);
+  rmSync(join(job, "args.txt"));
+  await run("deepseek/deepseek-flash");
+  assert.match(readFileSync(join(job, "args.txt"), "utf8"), /\[--model\]\n\[deepseek\/deepseek-flash\]/);
   rmSync(job, { recursive: true, force: true });
 });
 

@@ -42,7 +42,7 @@ test("a listing → turns, newest first, an unfinished start snapshot left out",
   const turns = parseListing(out, "/turns/r");
   assert.deepEqual(turns.map((t) => t.id), ["200-000002", "100-000001"]);
   assert.deepEqual(turns[1], { id: "100-000001", dir: "/turns/r/100-000001", started: 100_000, ended: 130_000, startTree: A, endTree: B, frozen: false,
-    startBig: [], endBig: [], session: "s", terminal: "t1", prompt: "first" });
+    startBig: [], endBig: [], session: "s", terminal: "t1", prompt: "first", recorded: false });
   assert.equal(turns[0].endTree, null);
   assert.equal(turns[0].terminal, null);
   // An end the walkthrough froze, and the big files a snapshot left out.
